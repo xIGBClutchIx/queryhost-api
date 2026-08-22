@@ -1,15 +1,16 @@
 # Operations
 
-The deployment is one private Railway Node.js service. It has no public domain; a future trusted Railway service may call it over private networking with the origin token.
+The deployment is one private Railway Node.js service. It has no public domain; the public QueryHost web service calls it over Railway private networking with the shared origin token.
 
 ## Private deployment baseline
 
 1. Verify that `vendor/queryhost-0.0.0.tgz` was produced from the intended clean library commit with `npm run verify` followed by `npm pack`.
 2. Create a private Railway project and attach the private API repository without generating a public domain.
 3. Create a random shared `QUERYHOST_ORIGIN_TOKEN` of at least 32 characters.
-4. Review `.railway/railway.ts` with `railway config plan` before applying it.
-5. Set one replica with Railway's current minimum 0.5 vCPU and 0.5 GB replica limits. Raise a limit only when measured usage proves it is too small.
-6. Configure a Railway compute email alert at $5 and the minimum $10 hard limit. The hard limit intentionally takes workloads offline instead of allowing an open-ended bill:
+4. Set `HOST=0.0.0.0` and `PORT=3000`. Configure the web service's server-only base URL as `http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3000`.
+5. Review `.railway/railway.ts` with `railway config plan` before applying it.
+6. Set one replica with Railway's current minimum 0.5 vCPU and 0.5 GB replica limits. Raise a limit only when measured usage proves it is too small.
+7. Configure a Railway compute email alert at $5 and the minimum $10 hard limit. The hard limit intentionally takes workloads offline instead of allowing an open-ended bill:
 
    ```bash
    railway usage limit set --target workspace --soft 5 --hard 10
