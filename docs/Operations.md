@@ -2,13 +2,13 @@
 
 The Slice 15 deployment is one private Railway Node.js service. It is not a public API and does not receive `api.query.host` until the Cloudflare edge is completed in Slice 16.
 
-## Before the first Railway deployment
+## Private deployment baseline
 
 1. Verify that `vendor/queryhost-0.0.0.tgz` was produced from the intended clean library commit with `npm run verify` followed by `npm pack`.
 2. Create a private Railway project and attach the private API repository without generating a public domain.
 3. Create a random shared `QUERYHOST_ORIGIN_TOKEN` of at least 32 characters.
 4. Review `.railway/railway.ts` with `railway config plan` before applying it.
-5. Set one replica with a 0.25 vCPU and 256 MB initial replica limit. Raise a limit only when measured usage proves it is too small.
+5. Set one replica with Railway's current minimum 0.5 vCPU and 0.5 GB replica limits. Raise a limit only when measured usage proves it is too small.
 6. Configure a Railway compute email alert at $5 and the minimum $10 hard limit. The hard limit intentionally takes workloads offline instead of allowing an open-ended bill:
 
    ```bash
@@ -20,13 +20,15 @@ Railway usage limits are workspace-wide. Revisit those dollar thresholds before 
 
 The limits above apply to compute usage. Do not use Railway Agent as part of the API runtime or deployment workflow; its spending limit is separate from compute.
 
+The first private production deployment completed successfully on August 21, 2026. Railway's `/health` check returned `200`, the process used about 0.04 GB of memory at idle, and the service had no Railway-generated or custom public domain. The workspace compute limits were verified at a $5 email alert and a $10 hard shutdown limit. Treat these values as the initial ceiling, not a capacity promise.
+
 ## Runtime cost ceilings
 
 The default process permits at most eight active library queries, 32 queued unique queries, two active queries per destination, and one new start per destination every 250 ms. Identical requests share one in-flight execution and do not consume extra queue positions. A full queue returns `429` before sockets open.
 
 The LRU stores at most 1,000 entries or 16 MiB of serialized results. Successful results live for 10 seconds, partial results for 5 seconds, and timeout/offline failures for 2 seconds. Invalid, blocked, malformed, aborted, and internal failures are not cached.
 
-After the first private load test, verify both the configured replica ceiling and observed usage:
+After a private load test, verify both the configured replica ceiling and observed usage:
 
 ```bash
 railway usage projects --project queryhost-api
