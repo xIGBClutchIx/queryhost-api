@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { HostedQueryInput, QueryExecutor } from "../../src/contracts.js";
 import { CapacityRejectedError } from "../../src/runtime/capacity-gate.js";
 import { QueryService } from "../../src/runtime/query-service.js";
-import { deferred, rustInput, successfulResult, testConfig } from "../helpers.js";
+import { deferred, rustInput, successfulResult, testConfig, testStartRate } from "../helpers.js";
 
 describe("query service", () => {
   it("coalesces concurrent identical requests and then serves the cache", async () => {
@@ -21,12 +21,14 @@ describe("query service", () => {
     execution.resolve(successfulResult());
     await expect(first).resolves.toMatchObject({ cache: { status: "miss", ageMs: 0 } });
     await expect(second).resolves.toMatchObject({ cache: { status: "coalesced", ageMs: 0 } });
+    expect(service.snapshot().capacity.rate.startsInWindow).toBe(1);
 
     now = 1_250;
     await expect(service.execute(rustInput())).resolves.toMatchObject({
       cache: { status: "hit", ageMs: 250, ttlMs: 10_000 },
     });
     expect(executor).toHaveBeenCalledOnce();
+    expect(service.snapshot().capacity.rate.startsInWindow).toBe(1);
   });
 
   it("does not let one waiter cancel shared live work", async () => {
@@ -84,6 +86,7 @@ describe("query service", () => {
           maxQueued: 3,
           maxPerDestination: 1,
           destinationCooldownMs: 0,
+          startRate: testStartRate(),
         },
       }),
       executor,
@@ -96,7 +99,7 @@ describe("query service", () => {
 
     await expect(rejected).rejects.toBeInstanceOf(CapacityRejectedError);
     expect(executor).toHaveBeenCalledTimes(2);
-    expect(service.snapshot().capacity).toEqual({ active: 2, queued: 3 });
+    expect(service.snapshot().capacity).toMatchObject({ active: 2, queued: 3 });
 
     let completed = 0;
     while (completed < accepted.length) {

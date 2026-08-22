@@ -1,4 +1,5 @@
 import type { CachePolicy } from "./runtime/result-cache.js";
+import type { StartRatePolicy } from "./runtime/start-rate-gate.js";
 
 const LOCAL_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "::1", "localhost"]);
 
@@ -7,6 +8,7 @@ export interface CapacityConfig {
   readonly maxQueued: number;
   readonly maxPerDestination: number;
   readonly destinationCooldownMs: number;
+  readonly startRate: StartRatePolicy;
 }
 
 export interface ApiConfig {
@@ -60,6 +62,25 @@ function originToken(environment: NodeJS.ProcessEnv, host: string): string | und
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiConfig {
   const host = environment["HOST"] ?? "127.0.0.1";
   const token = originToken(environment, host);
+  const maxStarts = integerEnvironment(
+    environment,
+    "QUERYHOST_MAX_STARTS_PER_WINDOW",
+    120,
+    1,
+    100_000,
+  );
+  const maxStartsPerDestination = integerEnvironment(
+    environment,
+    "QUERYHOST_MAX_STARTS_PER_DESTINATION",
+    6,
+    1,
+    10_000,
+  );
+  if (maxStartsPerDestination > maxStarts) {
+    throw new RangeError(
+      "QUERYHOST_MAX_STARTS_PER_DESTINATION cannot exceed QUERYHOST_MAX_STARTS_PER_WINDOW.",
+    );
+  }
 
   return {
     host,
@@ -68,15 +89,33 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiCon
     maxBodyBytes: integerEnvironment(environment, "QUERYHOST_MAX_BODY_BYTES", 4_096, 256, 65_536),
     capacity: {
       maxActive: integerEnvironment(environment, "QUERYHOST_MAX_ACTIVE", 8, 1, 256),
-      maxQueued: integerEnvironment(environment, "QUERYHOST_MAX_QUEUED", 32, 0, 4_096),
-      maxPerDestination: integerEnvironment(environment, "QUERYHOST_MAX_PER_DESTINATION", 2, 1, 32),
+      maxQueued: integerEnvironment(environment, "QUERYHOST_MAX_QUEUED", 16, 0, 4_096),
+      maxPerDestination: integerEnvironment(environment, "QUERYHOST_MAX_PER_DESTINATION", 1, 1, 32),
       destinationCooldownMs: integerEnvironment(
         environment,
         "QUERYHOST_DESTINATION_COOLDOWN_MS",
-        250,
+        2_000,
         0,
         60_000,
       ),
+      startRate: {
+        windowMs: integerEnvironment(
+          environment,
+          "QUERYHOST_START_WINDOW_MS",
+          60_000,
+          1_000,
+          3_600_000,
+        ),
+        maxStarts,
+        maxStartsPerDestination,
+        maxTrackedDestinations: integerEnvironment(
+          environment,
+          "QUERYHOST_MAX_TRACKED_DESTINATIONS",
+          1_000,
+          1,
+          100_000,
+        ),
+      },
     },
     cache: {
       maxEntries: integerEnvironment(environment, "QUERYHOST_CACHE_MAX_ENTRIES", 1_000, 1, 100_000),

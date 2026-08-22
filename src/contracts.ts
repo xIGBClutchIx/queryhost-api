@@ -33,6 +33,10 @@ export interface HealthCapacity {
   readonly active: number;
   readonly queued: number;
   readonly inFlight: number;
+  readonly startsInWindow: number;
+  readonly maxStartsInWindow: number;
+  readonly trackedDestinations: number;
+  readonly maxTrackedDestinations: number;
 }
 
 export interface HealthCache {

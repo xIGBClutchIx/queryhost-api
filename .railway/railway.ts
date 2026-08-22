@@ -14,9 +14,13 @@ export default defineRailway((context) => {
       QUERYHOST_ORIGIN_TOKEN: context.shared.QUERYHOST_ORIGIN_TOKEN,
       QUERYHOST_MAX_BODY_BYTES: "4096",
       QUERYHOST_MAX_ACTIVE: "8",
-      QUERYHOST_MAX_QUEUED: "32",
-      QUERYHOST_MAX_PER_DESTINATION: "2",
-      QUERYHOST_DESTINATION_COOLDOWN_MS: "250",
+      QUERYHOST_MAX_QUEUED: "16",
+      QUERYHOST_MAX_PER_DESTINATION: "1",
+      QUERYHOST_DESTINATION_COOLDOWN_MS: "2000",
+      QUERYHOST_START_WINDOW_MS: "60000",
+      QUERYHOST_MAX_STARTS_PER_WINDOW: "120",
+      QUERYHOST_MAX_STARTS_PER_DESTINATION: "6",
+      QUERYHOST_MAX_TRACKED_DESTINATIONS: "1000",
       QUERYHOST_CACHE_MAX_ENTRIES: "1000",
       QUERYHOST_CACHE_MAX_BYTES: "16777216",
       QUERYHOST_CACHE_SUCCESS_TTL_MS: "10000",
@@ -25,5 +29,5 @@ export default defineRailway((context) => {
     },
   });
 
-  return project("queryhost-api", { resources: [api] });
+  return project("queryhost", { resources: [api] });
 });

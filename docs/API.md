@@ -1,6 +1,6 @@
 # HTTP API
 
-The API is JSON-only and has no `/v1` prefix. Except for `GET /health`, requests require the `x-queryhost-origin-token` header. The token is supplied by the trusted edge and is never returned or logged.
+The API is JSON-only and has no `/v1` prefix. Except for `GET /health`, requests require the `x-queryhost-origin-token` header. The token is supplied by a trusted internal caller and is never returned or logged.
 
 ## `POST /query`
 
@@ -37,7 +37,15 @@ Returns minimal liveness and bounded operational counters without authentication
 {
   "status": "ok",
   "uptimeSeconds": 10,
-  "capacity": { "active": 0, "queued": 0, "inFlight": 0 },
+  "capacity": {
+    "active": 0,
+    "queued": 0,
+    "inFlight": 0,
+    "startsInWindow": 0,
+    "maxStartsInWindow": 120,
+    "trackedDestinations": 0,
+    "maxTrackedDestinations": 1000
+  },
   "cache": { "entries": 0, "bytes": 0, "maxEntries": 1000, "maxBytes": 16777216 }
 }
 ```

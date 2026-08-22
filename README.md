@@ -70,6 +70,6 @@ See [docs/API.md](docs/API.md) for the HTTP contract and [docs/Operations.md](do
 
 ## Deployment status
 
-The private Railway deployment is healthy with one 0.5 vCPU, 0.5 GB replica, no public domain, and workspace compute limits at a $5 alert and $10 hard shutdown. It remains intentionally unavailable to the public during Slice 15.
+The private Railway deployment is healthy with one 0.5 vCPU, 0.5 GB replica, no public domain, and workspace compute limits at a $5 alert and $10 hard shutdown. It remains intentionally unavailable to public callers.
 
-The vendored tarball is the same package artifact produced by `npm pack` and the API imports only its package-root exports. Replace the tarball dependency with the published npm version when publishing the library becomes an explicit project decision. Cloudflare routing, edge caching, public rate limiting, and `api.query.host` belong to Slice 16.
+The vendored tarball is the same package artifact produced by `npm pack` and the API imports only its package-root exports. Replace the tarball dependency with the published npm version when publishing the library becomes an explicit project decision. A future public Railway service may call this API over private networking; public caller limits belong at that boundary.

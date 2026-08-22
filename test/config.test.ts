@@ -28,9 +28,15 @@ describe("runtime configuration", () => {
       maxBodyBytes: 4_096,
       capacity: {
         maxActive: 8,
-        maxQueued: 32,
-        maxPerDestination: 2,
-        destinationCooldownMs: 250,
+        maxQueued: 16,
+        maxPerDestination: 1,
+        destinationCooldownMs: 2_000,
+        startRate: {
+          windowMs: 60_000,
+          maxStarts: 120,
+          maxStartsPerDestination: 6,
+          maxTrackedDestinations: 1_000,
+        },
       },
       cache: { maxEntries: 1_000, maxBytes: 16 * 1_024 * 1_024 },
     });
@@ -41,5 +47,13 @@ describe("runtime configuration", () => {
         QUERYHOST_MAX_ACTIVE: "0",
       }),
     ).toThrow("QUERYHOST_MAX_ACTIVE");
+
+    expect(() =>
+      loadConfig({
+        QUERYHOST_ORIGIN_TOKEN: "a".repeat(32),
+        QUERYHOST_MAX_STARTS_PER_WINDOW: "5",
+        QUERYHOST_MAX_STARTS_PER_DESTINATION: "6",
+      }),
+    ).toThrow("QUERYHOST_MAX_STARTS_PER_DESTINATION");
   });
 });

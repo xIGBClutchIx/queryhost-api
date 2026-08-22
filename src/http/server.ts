@@ -145,7 +145,7 @@ async function queryRoute(
         429,
         errorResponse("OVERLOADED", "The query service is at capacity. Try again later."),
         requestId,
-        { "retry-after": "1" },
+        { "retry-after": error.retryAfterSeconds.toString() },
       );
       return { status: 429, game: input.game };
     }
@@ -176,6 +176,10 @@ async function routeRequest(
         active: snapshot.capacity.active,
         queued: snapshot.capacity.queued,
         inFlight: snapshot.inFlight,
+        startsInWindow: snapshot.capacity.rate.startsInWindow,
+        maxStartsInWindow: snapshot.capacity.rate.maxStarts,
+        trackedDestinations: snapshot.capacity.rate.trackedDestinations,
+        maxTrackedDestinations: snapshot.capacity.rate.maxTrackedDestinations,
       },
       cache: snapshot.cache,
     };
@@ -187,7 +191,7 @@ async function routeRequest(
     sendJson(
       response,
       401,
-      errorResponse("ORIGIN_UNAUTHORIZED", "The request did not come through the trusted edge."),
+      errorResponse("ORIGIN_UNAUTHORIZED", "The request did not come from a trusted caller."),
       requestId,
     );
     return { status: 401 };

@@ -1,6 +1,7 @@
 import type { QueryResult } from "queryhost";
 
 import type { CapacityConfig } from "../config.js";
+import { StartRateGate, type StartRateSnapshot } from "./start-rate-gate.js";
 
 type Clock = () => number;
 type QueryTask = () => Promise<QueryResult>;
@@ -15,12 +16,16 @@ interface QueueEntry {
 export interface CapacitySnapshot {
   readonly active: number;
   readonly queued: number;
+  readonly rate: StartRateSnapshot;
 }
 
 export class CapacityRejectedError extends Error {
-  public constructor(message = "The query service is at capacity.") {
+  public readonly retryAfterSeconds: number;
+
+  public constructor(message = "The query service is at capacity.", retryAfterSeconds = 1) {
     super(message);
     this.name = "CapacityRejectedError";
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -28,6 +33,7 @@ export class CapacityRejectedError extends Error {
 export class CapacityGate {
   readonly #config: CapacityConfig;
   readonly #now: Clock;
+  readonly #startRate: StartRateGate;
   readonly #activeByDestination = new Map<string, number>();
   readonly #lastStartByDestination = new Map<string, number>();
   readonly #queue: QueueEntry[] = [];
@@ -39,6 +45,7 @@ export class CapacityGate {
   public constructor(config: CapacityConfig, now: Clock = Date.now) {
     this.#config = config;
     this.#now = now;
+    this.#startRate = new StartRateGate(config.startRate, now);
   }
 
   public run(destination: string, task: QueryTask): Promise<QueryResult> {
@@ -46,12 +53,23 @@ export class CapacityGate {
       return Promise.reject(new CapacityRejectedError("The query service is shutting down."));
     }
 
-    if (this.#canStart(destination)) {
-      return this.#start(destination, task);
+    const canStart = this.#canStart(destination);
+    if (!canStart && this.#queue.length >= this.#config.maxQueued) {
+      return Promise.reject(new CapacityRejectedError());
     }
 
-    if (this.#queue.length >= this.#config.maxQueued) {
-      return Promise.reject(new CapacityRejectedError());
+    const admission = this.#startRate.admit(destination);
+    if (!admission.admitted) {
+      return Promise.reject(
+        new CapacityRejectedError(
+          "The query service admission rate is limited.",
+          admission.retryAfterSeconds,
+        ),
+      );
+    }
+
+    if (canStart) {
+      return this.#start(destination, task);
     }
 
     return new Promise<QueryResult>((resolve, reject) => {
@@ -61,7 +79,7 @@ export class CapacityGate {
   }
 
   public snapshot(): CapacitySnapshot {
-    return { active: this.#active, queued: this.#queue.length };
+    return { active: this.#active, queued: this.#queue.length, rate: this.#startRate.snapshot() };
   }
 
   public close(): void {
@@ -78,6 +96,7 @@ export class CapacityGate {
     for (const entry of this.#queue.splice(0)) {
       entry.reject(error);
     }
+    this.#startRate.clear();
   }
 
   #canStart(destination: string): boolean {

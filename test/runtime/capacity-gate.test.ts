@@ -2,7 +2,7 @@ import type { QueryResult } from "queryhost";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CapacityGate, CapacityRejectedError } from "../../src/runtime/capacity-gate.js";
-import { deferred, successfulResult } from "../helpers.js";
+import { deferred, successfulResult, testStartRate } from "../helpers.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -15,6 +15,7 @@ describe("capacity gate", () => {
       maxQueued: 1,
       maxPerDestination: 1,
       destinationCooldownMs: 0,
+      startRate: testStartRate(),
     });
     const first = deferred<QueryResult>();
     let starts = 0;
@@ -29,7 +30,7 @@ describe("capacity gate", () => {
       gate.run("three", () => Promise.resolve(successfulResult())),
     ).rejects.toBeInstanceOf(CapacityRejectedError);
     expect(starts).toBe(1);
-    expect(gate.snapshot()).toEqual({ active: 1, queued: 1 });
+    expect(gate.snapshot()).toMatchObject({ active: 1, queued: 1 });
 
     first.resolve(successfulResult());
     await expect(active).resolves.toMatchObject({ ok: true });
@@ -42,6 +43,7 @@ describe("capacity gate", () => {
       maxQueued: 2,
       maxPerDestination: 1,
       destinationCooldownMs: 0,
+      startRate: testStartRate(),
     });
     const first = deferred<QueryResult>();
     const sameDestination = vi.fn(() => Promise.resolve(successfulResult()));
@@ -67,6 +69,7 @@ describe("capacity gate", () => {
         maxQueued: 2,
         maxPerDestination: 2,
         destinationCooldownMs: 250,
+        startRate: testStartRate(),
       },
       Date.now,
     );
@@ -80,5 +83,21 @@ describe("capacity gate", () => {
     await vi.advanceTimersByTimeAsync(1);
     await delayed;
     expect(task).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects excess admissions without invoking their tasks", async () => {
+    const gate = new CapacityGate({
+      maxActive: 2,
+      maxQueued: 0,
+      maxPerDestination: 1,
+      destinationCooldownMs: 0,
+      startRate: testStartRate({ maxStarts: 1, maxStartsPerDestination: 1 }),
+    });
+    const task = vi.fn(() => Promise.resolve(successfulResult()));
+
+    await expect(gate.run("one", task)).resolves.toMatchObject({ ok: true });
+    const rejected = gate.run("two", task);
+    await expect(rejected).rejects.toMatchObject({ retryAfterSeconds: 60 });
+    expect(task).toHaveBeenCalledOnce();
   });
 });

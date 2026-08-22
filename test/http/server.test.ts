@@ -13,7 +13,7 @@ import type {
 import { createApiServer, type ApiServer } from "../../src/http/server.js";
 import { ORIGIN_TOKEN_HEADER } from "../../src/http/origin-auth.js";
 import type { Logger, LogFields } from "../../src/logging.js";
-import { deferred, successfulResult, testConfig } from "../helpers.js";
+import { deferred, successfulResult, testConfig, testStartRate } from "../helpers.js";
 
 class SilentLogger implements Logger {
   public info(): void {}
@@ -97,7 +97,7 @@ describe("portable HTTP API", () => {
     await expect(parsed<ApiErrorResponse>(unauthorized)).resolves.toEqual({
       error: {
         code: "ORIGIN_UNAUTHORIZED",
-        message: "The request did not come through the trusted edge.",
+        message: "The request did not come from a trusted caller.",
       },
     });
 
@@ -215,6 +215,7 @@ describe("portable HTTP API", () => {
           maxQueued: 0,
           maxPerDestination: 1,
           destinationCooldownMs: 0,
+          startRate: testStartRate(),
         },
       }),
     );
@@ -241,5 +242,42 @@ describe("portable HTTP API", () => {
 
     execution.resolve(successfulResult());
     expect((await first).status).toBe(200);
+  });
+
+  it("returns the admission retry window before executing excess unique queries", async () => {
+    const executor = vi.fn(() => Promise.resolve(successfulResult()));
+    const { baseUrl } = await start(
+      executor,
+      testConfig({
+        capacity: {
+          maxActive: 2,
+          maxQueued: 2,
+          maxPerDestination: 1,
+          destinationCooldownMs: 0,
+          startRate: testStartRate({
+            windowMs: 60_000,
+            maxStarts: 1,
+            maxStartsPerDestination: 1,
+          }),
+        },
+      }),
+    );
+    const headers = authorizedHeaders();
+
+    const accepted = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers,
+      body: '{"game":"rust","host":"one.example.com"}',
+    });
+    expect(accepted.status).toBe(200);
+
+    const rejected = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers,
+      body: '{"game":"rust","host":"two.example.com"}',
+    });
+    expect(rejected.status).toBe(429);
+    expect(rejected.headers.get("retry-after")).toBe("60");
+    expect(executor).toHaveBeenCalledOnce();
   });
 });

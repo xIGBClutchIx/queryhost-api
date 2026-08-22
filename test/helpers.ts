@@ -1,5 +1,6 @@
 import type { ApiConfig } from "../src/config.js";
 import type { HostedQueryInput } from "../src/contracts.js";
+import type { StartRatePolicy } from "../src/runtime/start-rate-gate.js";
 import type { QueryResult } from "queryhost";
 
 export interface Deferred<T> {
@@ -32,6 +33,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       maxQueued: 3,
       maxPerDestination: 1,
       destinationCooldownMs: 0,
+      startRate: testStartRate(),
     },
     cache: {
       maxEntries: 10,
@@ -40,6 +42,16 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       partialTtlMs: 5_000,
       offlineTtlMs: 2_000,
     },
+    ...overrides,
+  };
+}
+
+export function testStartRate(overrides: Partial<StartRatePolicy> = {}): StartRatePolicy {
+  return {
+    windowMs: 60_000,
+    maxStarts: 100,
+    maxStartsPerDestination: 100,
+    maxTrackedDestinations: 100,
     ...overrides,
   };
 }

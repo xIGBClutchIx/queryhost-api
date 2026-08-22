@@ -1,6 +1,6 @@
 # Operations
 
-The Slice 15 deployment is one private Railway Node.js service. It is not a public API and does not receive `api.query.host` until the Cloudflare edge is completed in Slice 16.
+The deployment is one private Railway Node.js service. It has no public domain; a future trusted Railway service may call it over private networking with the origin token.
 
 ## Private deployment baseline
 
@@ -24,14 +24,14 @@ The first private production deployment completed successfully on August 21, 202
 
 ## Runtime cost ceilings
 
-The default process permits at most eight active library queries, 32 queued unique queries, two active queries per destination, and one new start per destination every 250 ms. Identical requests share one in-flight execution and do not consume extra queue positions. A full queue returns `429` before sockets open.
+The default process permits at most eight active library queries, 16 queued unique queries, one active query per destination, and one new start per destination every two seconds. A rolling 60-second admission window permits at most 120 unique live-query admissions globally and six per destination while tracking no more than 1,000 destinations. Identical requests share one in-flight execution and do not consume extra queue positions or admission slots. A full queue or admission window returns `429` before sockets open.
 
 The LRU stores at most 1,000 entries or 16 MiB of serialized results. Successful results live for 10 seconds, partial results for 5 seconds, and timeout/offline failures for 2 seconds. Invalid, blocked, malformed, aborted, and internal failures are not cached.
 
 After a private load test, verify both the configured replica ceiling and observed usage:
 
 ```bash
-railway usage projects --project queryhost-api
+railway usage projects --project queryhost
 railway usage limit status --target workspace
 ```
 
@@ -41,7 +41,7 @@ Record the measured CPU and memory peaks before changing the initial replica lim
 
 Logs are newline-delimited JSON containing event names, request IDs, a fixed route name, method, status, duration, canonical game ID, and cache status where applicable. Unknown paths are recorded only as `unmatched`. Logs intentionally omit target hosts, request bodies, player data, secrets, and exception contents.
 
-Railway should check `GET /health`. Track active, queued, and in-flight work together with cache bytes and entries. A service that repeatedly reaches its queue or replica limits should reject traffic; do not add replicas or external cache infrastructure until measurements justify the cost.
+Railway should check `GET /health`. Track active, queued, in-flight, rolling-start, and tracked-destination counts together with cache bytes and entries. A service that repeatedly reaches its admission, queue, or replica limits should reject traffic; do not add replicas or external cache infrastructure until measurements justify the cost.
 
 ## Shutdown
 
