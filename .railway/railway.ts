@@ -1,7 +1,8 @@
-import { defineRailway, project, service } from "railway/iac";
+import { defineRailway, github, project, service } from "railway/iac";
 
 export default defineRailway((context) => {
   const api = service("api", {
+    source: github("xIGBClutchIx/queryhost-api", { branch: "main" }),
     build: "npm run build",
     start: "npm start",
     healthcheck: "/health",

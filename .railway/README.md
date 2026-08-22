@@ -1,6 +1,6 @@
 # Railway configuration
 
-`.railway/railway.ts` owns the portable service settings, one-replica intent, healthcheck, and bounded runtime variables. It deliberately declares no database, volume, Redis service, custom domain, or public Railway domain.
+`.railway/railway.ts` owns the private GitHub source, portable service settings, one-replica intent, healthcheck, and bounded runtime variables. It deliberately declares no database, volume, Redis service, custom domain, or public Railway domain.
 
 Railway infrastructure-as-code is applied with the Railway CLI:
 
