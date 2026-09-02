@@ -12,16 +12,12 @@ The service owns short in-memory caching, identical-request coalescing, global a
 
 ## Development
 
-The repository contains a packed snapshot of the private library in `vendor/`. Refresh it from the sibling library after changing `queryhost`:
+The API is pinned to the exact public `queryhost@1.0.0` registry release. Install dependencies and run the complete gate with:
 
 ```bash
-cd ../query
+cd ../api
 npm install
 npm run verify
-
-cd ../api
-npm pack ../query --pack-destination vendor
-npm install
 ```
 
 Start a loopback-only development service without origin authentication:
@@ -72,4 +68,4 @@ See [docs/API.md](docs/API.md) for the HTTP contract and [docs/Operations.md](do
 
 The private Railway deployment is healthy with one 0.5 vCPU, 0.5 GB replica, no public domain, and workspace compute limits at a $5 alert and $10 hard shutdown. Browser traffic reaches it only through the public web service's validated and throttled server route.
 
-The vendored tarball is the same package artifact produced by `npm pack` and the API imports only its package-root exports. Replace the tarball dependency with the published npm version when publishing the library becomes an explicit project decision. The web service calls this API through `api.railway.internal`; public caller limits stay at the web boundary.
+The API imports only the public package-root exports from exact `queryhost@1.0.0`. The web service calls this API through `api.railway.internal`; public caller limits stay at the web boundary.
