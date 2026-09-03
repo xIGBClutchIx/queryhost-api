@@ -8,6 +8,11 @@ GET  /games
 GET  /health
 ```
 
+Related public source repositories:
+
+- [QueryHost web and WebMCP integration](https://github.com/xIGBClutchIx/queryhost-web)
+- [QueryHost TypeScript library](https://github.com/xIGBClutchIx/queryhost)
+
 The service owns short in-memory caching, identical-request coalescing, global and per-destination capacity limits, destination cooldowns, origin authentication, and structured operational logs. It contains no game protocols, Cloudflare runtime code, persistent cache, database, accounts, or billing system.
 
 ## Development

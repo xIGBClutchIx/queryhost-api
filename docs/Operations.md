@@ -5,7 +5,7 @@ The deployment is one private Railway Node.js service. It has no public domain; 
 ## Private deployment baseline
 
 1. Verify that `package.json` and `package-lock.json` pin `queryhost` to the intended exact public version, then run `npm ci` and `npm run verify`.
-2. Create a private Railway project and attach the private API repository without generating a public domain.
+2. Create a private Railway service, attach the public API source repository, and do not generate a public domain.
 3. Create a random shared `QUERYHOST_ORIGIN_TOKEN` of at least 32 characters.
 4. Set `HOST=0.0.0.0` and `PORT=3000`. Configure the web service's server-only base URL as `http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3000`.
 5. Review `.railway/railway.ts` with `railway config plan` before applying it.
