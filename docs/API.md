@@ -10,10 +10,12 @@ Request fields:
 | ----------- | ------------------- | -------- | ---------------------------------------------- |
 | `game`      | string              | yes      | Canonical game ID or library alias             |
 | `host`      | string              | yes      | Plain hostname or IP literal, never URL syntax |
-| `port`      | integer             | no       | 1 through 65,535                               |
+| `port`      | integer             | no*      | 1 through 65,535                               |
 | `queryPort` | integer             | no       | 1 through 65,535                               |
 | `mode`      | `summary` or `full` | no       | Defaults to `full`                             |
 | `timeoutMs` | integer             | no       | 1 through 5,000; defaults to 5,000             |
+
+`port` is required when `game` is `a2s`. For that generic profile it is the actual A2S query destination and `queryPort` must be omitted. Named profiles keep their registry defaults and separate query-port conventions.
 
 Unknown fields, compressed bodies, non-JSON bodies, and bodies over the configured byte limit are rejected before query execution. A structurally accepted query returns HTTP `200` with the library result, including normal query failures. Hosted metadata appears in `cache` and in the `x-queryhost-cache` and `Age` headers.
 

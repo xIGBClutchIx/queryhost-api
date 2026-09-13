@@ -122,6 +122,9 @@ function effectiveQueryPort(
     return explicitQueryPort;
   }
   const definition = getGameDefinition(game);
+  if (definition.defaultPort === undefined) {
+    return port;
+  }
   const offset = (definition.defaultQueryPort ?? definition.defaultPort) - definition.defaultPort;
   const derived = port + offset;
   if (derived < 1 || derived > 65_535) {
@@ -137,8 +140,18 @@ export function parseQueryInput(text: string): HostedQueryInput {
 
   const game = canonicalGameId(gameId(body["game"]));
   const definition = getGameDefinition(game);
-  const port = optionalInteger(body["port"], "port", 1, 65_535) ?? definition.defaultPort;
+  const suppliedPort = optionalInteger(body["port"], "port", 1, 65_535);
   const explicitQueryPort = optionalInteger(body["queryPort"], "queryPort", 1, 65_535);
+  if (definition.defaultPort === undefined && suppliedPort === undefined) {
+    throw new QueryInputError("port is required for generic A2S queries.");
+  }
+  if (game === "a2s" && explicitQueryPort !== undefined) {
+    throw new QueryInputError("Use port as the query destination for generic A2S queries.");
+  }
+  const port = suppliedPort ?? definition.defaultPort;
+  if (port === undefined) {
+    throw new QueryInputError("The selected game profile has no default port.");
+  }
 
   return {
     game,

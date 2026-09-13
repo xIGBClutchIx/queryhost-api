@@ -8,6 +8,20 @@ import {
 } from "../../src/validation/query-input.js";
 
 describe("hosted query input", () => {
+  it("requires and preserves the generic A2S query port", () => {
+    expect(parseQueryInput('{"game":"a2s","host":"play.example.com","port":27016}')).toMatchObject({
+      game: "a2s",
+      port: 27_016,
+      queryPort: 27_016,
+    });
+    expect(() => parseQueryInput('{"game":"a2s","host":"play.example.com"}')).toThrow(
+      "port is required for generic A2S",
+    );
+    expect(() =>
+      parseQueryInput('{"game":"a2s","host":"play.example.com","port":27016,"queryPort":27017}'),
+    ).toThrow("Use port as the query destination");
+  });
+
   it("canonicalizes aliases, hostnames, defaults, and derived query ports", () => {
     const input = parseQueryInput(
       JSON.stringify({ game: "zomboid", host: " PZ.Example.COM. ", mode: "summary" }),
