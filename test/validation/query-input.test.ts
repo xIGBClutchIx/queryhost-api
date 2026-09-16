@@ -44,6 +44,32 @@ describe("hosted query input", () => {
     });
   });
 
+  it.each([
+    ["palworld", 27_015],
+    ["dst", 27_016],
+  ])("keeps %s's independent query port when the game port changes", (game, queryPort) => {
+    const input = parseQueryInput(JSON.stringify({ game, host: "play.example.com", port: 65_535 }));
+    expect(input.queryPort).toBe(queryPort);
+    expect(queryDestinationKey(input)).toBe(`play.example.com:${queryPort}`);
+    expect(
+      parseQueryInput(
+        JSON.stringify({ game, host: "play.example.com", port: 9000, queryPort: 29000 }),
+      ).queryPort,
+    ).toBe(29_000);
+  });
+
+  it.each([
+    ["dayz", 3],
+    ["valheim", 1],
+  ])("preserves %s's query-port offset", (game, offset) => {
+    expect(
+      parseQueryInput(JSON.stringify({ game, host: "play.example.com", port: 9000 })).queryPort,
+    ).toBe(9000 + Number(offset));
+    expect(() =>
+      parseQueryInput(JSON.stringify({ game, host: "play.example.com", port: 65_535 })),
+    ).toThrow("derived query port");
+  });
+
   it("includes every result-affecting field in the stable cache key", () => {
     const base = parseQueryInput('{"game":"rust","host":"play.example.com"}');
     const equivalent = parseQueryInput(

@@ -21,7 +21,7 @@
     "verify": "npm run format:check && npm run build && npm run typecheck && npm run lint && npm run test"
   },
   "dependencies": {
-    "queryhost": "1.1.0"
+    "queryhost": "file:vendor/queryhost-c33e128.tgz"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
