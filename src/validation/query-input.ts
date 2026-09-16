@@ -125,6 +125,9 @@ function effectiveQueryPort(
   if (definition.defaultPort === undefined) {
     return port;
   }
+  if (definition.queryPortStrategy === "fixed" && definition.defaultQueryPort !== undefined) {
+    return definition.defaultQueryPort;
+  }
   const offset = (definition.defaultQueryPort ?? definition.defaultPort) - definition.defaultPort;
   const derived = port + offset;
   if (derived < 1 || derived > 65_535) {
