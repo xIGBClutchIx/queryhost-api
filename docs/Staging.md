@@ -1,6 +1,6 @@
 # Game-support staging
 
-The initial game-support test deployed the API to the `staging` environment using a package packed from library commit `c33e128`. The API now consumes the exact public `queryhost` 1.2.0 release for staging and production.
+The initial game-support test deployed the API to the `staging` environment using a package packed from library commit `c33e128`. The API now consumes the exact public `queryhost` 1.2.1 release for staging and production.
 
 The service is `api-staging`. It has no public domain. `HOST=::` supports Railway private networking, `PORT=3000`, and a fresh staging-only `QUERYHOST_ORIGIN_TOKEN` authenticates the staging web service. Production source, variables, and domains remain separate.
 
