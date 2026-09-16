@@ -13,6 +13,6 @@ This repository contains the portable hosted API. It consumes `queryhost` only t
 
 ## Finish gate
 
-Run `npm run verify`. Add focused tests for contract, cache, coalescing, capacity, and lifecycle changes. Do not deploy, publish, push, or expose a Railway domain without explicit approval.
+Run `npm run verify`. Add focused tests for contract, cache, coalescing, capacity, and lifecycle changes. Push, deploy, publish, or expose domains only when the current request authorizes that action. Prepare and verify the requested work first; ask once if authorization or the destination remains unresolved.
 
 Keep this file operational. Put API contracts in `docs/API.md` and deployment procedures in `docs/Operations.md`.
