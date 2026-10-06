@@ -59,6 +59,28 @@ describe("start rate gate", () => {
     expect(gate.snapshot()).toMatchObject({ startsInWindow: 1, trackedDestinations: 1 });
   });
 
+  it("bounds refunds with their own rolling window", () => {
+    let now = 1_000;
+    const gate = new StartRateGate(testStartRate({ windowMs: 10_000, maxStarts: 2 }), () => now);
+    const refundNext = (destination: string): void => {
+      const decision = gate.admit(destination);
+      expect(decision).toMatchObject({ admitted: true });
+      if (decision.admitted) {
+        gate.refund(destination, decision.startedAt);
+      }
+    };
+
+    refundNext("one");
+    refundNext("two");
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 0 });
+    refundNext("three");
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 1, trackedDestinations: 1 });
+
+    now += 10_000;
+    refundNext("four");
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 0, trackedDestinations: 0 });
+  });
+
   it("clears all retained admission state", () => {
     const gate = new StartRateGate(testStartRate());
     expect(gate.admit("one")).toMatchObject({ admitted: true });

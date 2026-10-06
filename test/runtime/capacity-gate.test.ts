@@ -107,21 +107,39 @@ describe("capacity gate", () => {
       maxQueued: 0,
       maxPerDestination: 1,
       destinationCooldownMs: 0,
-      startRate: testStartRate({ maxStarts: 2, maxTrackedDestinations: 2 }),
+      startRate: testStartRate({ maxStarts: 3, maxTrackedDestinations: 3 }),
     });
     const blocked = vi.fn(() => Promise.resolve(failedResult("TARGET_BLOCKED")));
 
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       await expect(gate.run(`10.0.0.${index}:28017`, blocked)).resolves.toMatchObject({
         ok: false,
         error: { code: "TARGET_BLOCKED" },
       });
     }
-    expect(blocked).toHaveBeenCalledTimes(10);
     expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 0, trackedDestinations: 0 });
     await expect(
       gate.run("play.example.com:28017", () => Promise.resolve(successfulResult())),
     ).resolves.toMatchObject({ ok: true });
+  });
+
+  it("stops calling the executor once blocked refunds exhaust their window", async () => {
+    const gate = new CapacityGate({
+      maxActive: 2,
+      maxQueued: 0,
+      maxPerDestination: 1,
+      destinationCooldownMs: 0,
+      startRate: testStartRate({ maxStarts: 2 }),
+    });
+    const blocked = vi.fn(() => Promise.resolve(failedResult("TARGET_BLOCKED")));
+
+    for (let index = 0; index < 4; index += 1) {
+      await expect(gate.run(`10.0.0.${index}:28017`, blocked)).resolves.toMatchObject({
+        ok: false,
+      });
+    }
+    await expect(gate.run("10.0.0.4:28017", blocked)).rejects.toBeInstanceOf(CapacityRejectedError);
+    expect(blocked).toHaveBeenCalledTimes(4);
   });
 
   it("keeps the admission spent for targets that were queried", async () => {

@@ -23,6 +23,7 @@ export class StartRateGate {
   readonly #policy: StartRatePolicy;
   readonly #now: Clock;
   readonly #globalStarts: number[] = [];
+  readonly #refunds: number[] = [];
   readonly #startsByDestination = new Map<string, number[]>();
 
   public constructor(policy: StartRatePolicy, now: Clock = Date.now) {
@@ -66,10 +67,20 @@ export class StartRateGate {
 
   /**
    * Returns an admission that never reached the network, so rejected targets cannot drain the
-   * shared window or fill the tracked-destination bound. Expired or cleared admissions are ignored.
+   * shared window or fill the tracked-destination bound. Refunds have their own rolling ceiling of
+   * `maxStarts`, so executor calls stay bounded; beyond it the admission stays spent. Expired or
+   * cleared admissions are ignored.
    */
   public refund(destination: string, startedAt: number): void {
-    this.#remove(this.#globalStarts, startedAt);
+    const now = this.#now();
+    this.#prune(this.#refunds, now);
+    if (this.#refunds.length >= this.#policy.maxStarts) {
+      return;
+    }
+    if (!this.#remove(this.#globalStarts, startedAt)) {
+      return;
+    }
+    this.#refunds.push(now);
     const destinationStarts = this.#startsByDestination.get(destination);
     if (destinationStarts === undefined) {
       return;
@@ -94,6 +105,7 @@ export class StartRateGate {
 
   public clear(): void {
     this.#globalStarts.length = 0;
+    this.#refunds.length = 0;
     this.#startsByDestination.clear();
   }
 
@@ -111,12 +123,14 @@ export class StartRateGate {
     }
   }
 
-  #remove(starts: number[], startedAt: number): void {
+  #remove(starts: number[], startedAt: number): boolean {
     // Equal timestamps are interchangeable, so removing any match keeps the window ordered.
     const index = starts.lastIndexOf(startedAt);
-    if (index !== -1) {
-      starts.splice(index, 1);
+    if (index === -1) {
+      return false;
     }
+    starts.splice(index, 1);
+    return true;
   }
 
   #pruneDestinations(now: number): void {
