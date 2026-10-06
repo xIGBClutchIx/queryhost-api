@@ -13,7 +13,8 @@ export interface StartRateSnapshot {
 }
 
 export type StartRateDecision =
-  { readonly admitted: true } | { readonly admitted: false; readonly retryAfterSeconds: number };
+  | { readonly admitted: true; readonly startedAt: number }
+  | { readonly admitted: false; readonly retryAfterSeconds: number };
 
 type Clock = () => number;
 
@@ -60,7 +61,23 @@ export class StartRateGate {
 
     this.#globalStarts.push(now);
     destinationStarts.push(now);
-    return { admitted: true };
+    return { admitted: true, startedAt: now };
+  }
+
+  /**
+   * Returns an admission that never reached the network, so rejected targets cannot drain the
+   * shared window or fill the tracked-destination bound. Expired or cleared admissions are ignored.
+   */
+  public refund(destination: string, startedAt: number): void {
+    this.#remove(this.#globalStarts, startedAt);
+    const destinationStarts = this.#startsByDestination.get(destination);
+    if (destinationStarts === undefined) {
+      return;
+    }
+    this.#remove(destinationStarts, startedAt);
+    if (destinationStarts.length === 0) {
+      this.#startsByDestination.delete(destination);
+    }
   }
 
   public snapshot(): StartRateSnapshot {
@@ -91,6 +108,14 @@ export class StartRateGate {
     }
     if (expired > 0) {
       starts.splice(0, expired);
+    }
+  }
+
+  #remove(starts: number[], startedAt: number): void {
+    // Equal timestamps are interchangeable, so removing any match keeps the window ordered.
+    const index = starts.lastIndexOf(startedAt);
+    if (index !== -1) {
+      starts.splice(index, 1);
     }
   }
 

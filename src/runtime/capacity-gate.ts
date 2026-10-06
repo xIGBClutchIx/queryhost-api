@@ -68,12 +68,23 @@ export class CapacityGate {
       );
     }
 
+    const startedAt = admission.startedAt;
+    const admittedTask = async (): Promise<QueryResult> => {
+      const result = await task();
+      // The library rejects blocked targets before sending any game-query packet. Refunding them
+      // keeps queries to private hosts from locking every caller out of the admission window.
+      if (!result.ok && result.error.code === "TARGET_BLOCKED") {
+        this.#startRate.refund(destination, startedAt);
+      }
+      return result;
+    };
+
     if (canStart) {
-      return this.#start(destination, task);
+      return this.#start(destination, admittedTask);
     }
 
     return new Promise<QueryResult>((resolve, reject) => {
-      this.#queue.push({ destination, task, resolve, reject });
+      this.#queue.push({ destination, task: admittedTask, resolve, reject });
       this.#drain();
     });
   }

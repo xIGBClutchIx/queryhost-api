@@ -11,14 +11,14 @@ describe("start rate gate", () => {
       () => now,
     );
 
-    expect(gate.admit("one")).toEqual({ admitted: true });
-    expect(gate.admit("one")).toEqual({ admitted: true });
+    expect(gate.admit("one")).toMatchObject({ admitted: true });
+    expect(gate.admit("one")).toMatchObject({ admitted: true });
     expect(gate.admit("one")).toEqual({ admitted: false, retryAfterSeconds: 10 });
-    expect(gate.admit("two")).toEqual({ admitted: true });
+    expect(gate.admit("two")).toMatchObject({ admitted: true });
     expect(gate.admit("three")).toEqual({ admitted: false, retryAfterSeconds: 10 });
 
     now += 10_000;
-    expect(gate.admit("one")).toEqual({ admitted: true });
+    expect(gate.admit("one")).toMatchObject({ admitted: true });
   });
 
   it("fails closed at the tracked-destination bound and releases expired entries", () => {
@@ -28,19 +28,40 @@ describe("start rate gate", () => {
       () => now,
     );
 
-    expect(gate.admit("one")).toEqual({ admitted: true });
-    expect(gate.admit("two")).toEqual({ admitted: true });
+    expect(gate.admit("one")).toMatchObject({ admitted: true });
+    expect(gate.admit("two")).toMatchObject({ admitted: true });
     expect(gate.snapshot()).toMatchObject({ trackedDestinations: 2 });
     expect(gate.admit("three")).toEqual({ admitted: false, retryAfterSeconds: 2 });
 
     now += 2_000;
-    expect(gate.admit("three")).toEqual({ admitted: true });
+    expect(gate.admit("three")).toMatchObject({ admitted: true });
     expect(gate.snapshot()).toMatchObject({ trackedDestinations: 1 });
+  });
+
+  it("refunds an admission to both the global and destination windows", () => {
+    let now = 1_000;
+    const gate = new StartRateGate(
+      testStartRate({ maxStarts: 1, maxTrackedDestinations: 1 }),
+      () => now,
+    );
+
+    const blocked = gate.admit("private");
+    expect(blocked).toEqual({ admitted: true, startedAt: 1_000 });
+    if (!blocked.admitted) {
+      return;
+    }
+    gate.refund("private", blocked.startedAt);
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 0, trackedDestinations: 0 });
+
+    now += 1;
+    expect(gate.admit("public")).toMatchObject({ admitted: true });
+    gate.refund("public", blocked.startedAt);
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 1, trackedDestinations: 1 });
   });
 
   it("clears all retained admission state", () => {
     const gate = new StartRateGate(testStartRate());
-    expect(gate.admit("one")).toEqual({ admitted: true });
+    expect(gate.admit("one")).toMatchObject({ admitted: true });
     gate.clear();
     expect(gate.snapshot()).toMatchObject({ startsInWindow: 0, trackedDestinations: 0 });
   });

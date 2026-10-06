@@ -83,7 +83,9 @@ export function successfulResult(partial = false): QueryResult {
   };
 }
 
-export function failedResult(code: "CONNECTION_FAILED" | "INVALID_INPUT" | "TIMEOUT"): QueryResult {
+export function failedResult(
+  code: "CONNECTION_FAILED" | "INVALID_INPUT" | "TARGET_BLOCKED" | "TIMEOUT",
+): QueryResult {
   return {
     ok: false,
     game: "rust",
