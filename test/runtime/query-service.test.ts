@@ -206,4 +206,34 @@ describe("query service", () => {
     expect(snapshot.live.latencyMs.at(-1)).toEqual({ le: null, count: 1 });
     expect(JSON.stringify(snapshot)).not.toContain("example.com");
   });
+
+  it("coalesces a burst of short-deadline requests behind a longer incompatible run", async () => {
+    let now = 0;
+    const executions: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const executor = vi.fn((): Promise<QueryResult> => {
+      const execution = deferred<QueryResult>();
+      executions.push(execution);
+      return execution.promise;
+    });
+    const config = testConfig({
+      capacity: { ...testConfig().capacity, maxPerDestination: 4 },
+    });
+    const service = new QueryService(config, executor, () => now);
+
+    const long = service.execute(rustInput("play.example.com", 5_000));
+    now = 100;
+    const shorts = Array.from({ length: 3 }, () =>
+      service.execute(rustInput("play.example.com", 3_000)),
+    );
+    expect(executor).toHaveBeenCalledTimes(2);
+    expect(service.snapshot().inFlight).toBe(2);
+
+    for (const execution of executions) {
+      execution.resolve(successfulResult());
+    }
+    await expect(long).resolves.toMatchObject({ cache: { status: "miss" } });
+    const statuses = (await Promise.all(shorts)).map((result) => result.cache.status);
+    expect(statuses).toEqual(["miss", "coalesced", "coalesced"]);
+    expect(service.snapshot().inFlight).toBe(0);
+  });
 });

@@ -52,7 +52,10 @@ export class QueryService {
   readonly #policy: ApiConfig["cache"];
   readonly #usage: UsageStats;
   readonly #now: Clock;
-  readonly #inFlight = new Map<string, InFlightQuery>();
+  // Each key can have several live runs with different deadlines; every one
+  // is an admitted capacity-gate task, so the lists stay bounded by capacity.
+  readonly #inFlight = new Map<string, InFlightQuery[]>();
+  #inFlightRuns = 0;
 
   public constructor(
     config: ApiConfig,
@@ -81,14 +84,13 @@ export class QueryService {
     }
 
     const startedAt = this.#now();
-    const shared = this.#inFlight.get(key);
+    const runs = this.#inFlight.get(key) ?? [];
     // Join live work only when it had at least this caller's budget (so its
     // failures apply here too) and still finishes within this caller's deadline.
-    if (
-      shared !== undefined &&
-      shared.timeoutMs >= input.timeoutMs &&
-      shared.deadline <= startedAt + input.timeoutMs
-    ) {
+    const shared = runs.find(
+      (run) => run.timeoutMs >= input.timeoutMs && run.deadline <= startedAt + input.timeoutMs,
+    );
+    if (shared !== undefined) {
       const result = await shared.result;
       this.#usage.recordQuery(input.game, "coalesced");
       return hostedResponse(result, {
@@ -104,11 +106,8 @@ export class QueryService {
       timeoutMs: input.timeoutMs,
       deadline: startedAt + input.timeoutMs,
     };
-    // Keep advertising the run with the larger budget: it is the one later
-    // callers can safely join.
-    if (shared === undefined || live.timeoutMs > shared.timeoutMs) {
-      this.#inFlight.set(key, live);
-    }
+    this.#inFlight.set(key, [...runs, live]);
+    this.#inFlightRuns += 1;
     try {
       const result = await execution;
       this.#usage.recordQuery(input.game, "miss");
@@ -118,9 +117,13 @@ export class QueryService {
         ttlMs: resultTtlMs(result, this.#policy),
       });
     } finally {
-      if (this.#inFlight.get(key) === live) {
+      const remaining = (this.#inFlight.get(key) ?? []).filter((run) => run !== live);
+      if (remaining.length === 0) {
         this.#inFlight.delete(key);
+      } else {
+        this.#inFlight.set(key, remaining);
       }
+      this.#inFlightRuns -= 1;
     }
   }
 
@@ -128,7 +131,7 @@ export class QueryService {
     return {
       capacity: this.#gate.snapshot(),
       cache: this.#cache.snapshot(),
-      inFlight: this.#inFlight.size,
+      inFlight: this.#inFlightRuns,
     };
   }
 
