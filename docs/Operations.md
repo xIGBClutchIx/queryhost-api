@@ -29,6 +29,8 @@ The default process permits at most eight active library queries, 16 queued uniq
 
 The LRU stores at most 1,000 entries or 16 MiB of serialized results. Successful results live for 10 seconds, partial results for 5 seconds, and timeout/offline failures for 2 seconds. Invalid, blocked, malformed, aborted, and internal failures are not cached.
 
+Cache keys and in-flight sharing ignore `timeoutMs`, so callers with different deadlines share results. A cached failure serves only callers whose deadline is no longer than the one that produced it, and a request joins in-flight work only when that run has at least the caller's budget and should finish before the caller's deadline; otherwise it starts its own run.
+
 After a private load test, verify both the configured replica ceiling and observed usage:
 
 ```bash
@@ -42,7 +44,7 @@ Record the measured CPU and memory peaks before changing the initial replica lim
 
 Logs are newline-delimited JSON containing event names, request IDs, a fixed route name, method, status, duration, canonical game ID, and cache status where applicable. Unknown paths are recorded only as `unmatched`. Logs intentionally omit target hosts, request bodies, player data, secrets, and exception contents.
 
-Railway should check `GET /health`. Track active, queued, in-flight, rolling-start, and tracked-destination counts together with cache bytes and entries. A service that repeatedly reaches its admission, queue, or replica limits should reject traffic; do not add replicas or external cache infrastructure until measurements justify the cost.
+Railway should check `GET /health`. Track active, queued, in-flight, rolling-start, and tracked-destination counts together with cache bytes and entries. `GET /stats` (origin token required) returns aggregate counters since process start: responses by status, cache hit/miss/coalesced, per-game query counts, live outcomes by error code, and a fixed-bucket live latency histogram. Every key comes from a closed set, so it never records targets or callers. A service that repeatedly reaches its admission, queue, or replica limits should reject traffic; do not add replicas or external cache infrastructure until measurements justify the cost.
 
 ## Shutdown
 

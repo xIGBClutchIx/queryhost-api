@@ -25,6 +25,8 @@ Cache statuses are:
 - `coalesced`: this request shared an identical live query
 - `hit`: the result came from the process-local LRU
 
+`timeoutMs` is not part of the cache key. A cached success serves any deadline; a cached timeout or offline failure serves only requests whose `timeoutMs` is no greater than the one that produced it. A request shares in-flight work only when that run has at least the request's `timeoutMs` and should finish before the request's own deadline.
+
 When the live-work queue is full, the API returns HTTP `429` with `Retry-After: 1` before invoking the library.
 
 ## `GET /games`
@@ -53,6 +55,36 @@ Returns minimal liveness and bounded operational counters without authentication
 ```
 
 Health does not expose targets, results, secrets, or query history.
+
+## `GET /stats`
+
+Returns aggregate usage counters since process start for trusted callers:
+
+```json
+{
+  "startedAt": "2026-10-08T00:00:00.000Z",
+  "responses": { "200": 12, "429": 1 },
+  "queries": { "hit": 7, "miss": 4, "coalesced": 1 },
+  "games": { "minecraft-java": 9, "rust": 3 },
+  "live": {
+    "ok": 3,
+    "partial": 0,
+    "failed": 1,
+    "errors": { "TIMEOUT": 1 },
+    "latencyMs": [
+      { "le": 100, "count": 1 },
+      { "le": 250, "count": 2 },
+      { "le": 500, "count": 0 },
+      { "le": 1000, "count": 0 },
+      { "le": 2500, "count": 0 },
+      { "le": 5000, "count": 1 },
+      { "le": null, "count": 0 }
+    ]
+  }
+}
+```
+
+`live` counts executor runs (misses), with latency measured around the library call. Counters are keyed only by HTTP status, registry game ID, cache status, and library error code; they never contain targets, callers, or results, and reset when the process restarts.
 
 ## HTTP errors
 

@@ -1,11 +1,12 @@
 # QueryHost API
 
-Portable Node.js service for hosted QueryHost game-server queries. It consumes the standalone `queryhost` package and exposes three routes with no version prefix:
+Portable Node.js service for hosted QueryHost game-server queries. It consumes the standalone `queryhost` package and exposes four routes with no version prefix:
 
 ```text
 POST /query
 GET  /games
 GET  /health
+GET  /stats
 ```
 
 Related public source repositories:

@@ -15,13 +15,15 @@ import type {
 import type { Logger } from "../logging.js";
 import { CapacityRejectedError } from "../runtime/capacity-gate.js";
 import { QueryService } from "../runtime/query-service.js";
+import { UsageStats, type UsageSnapshot } from "../runtime/usage-stats.js";
 import { QueryInputError, parseQueryInput } from "../validation/query-input.js";
 import { BodyReadError, readBoundedBody } from "./body.js";
 import { isOriginAuthorized } from "./origin-auth.js";
 
 type Clock = () => number;
-type JsonPayload = ApiErrorResponse | GamesResponse | HealthResponse | HostedQueryResponse;
-type RouteName = "/games" | "/health" | "/query" | "unmatched";
+type JsonPayload =
+  ApiErrorResponse | GamesResponse | HealthResponse | HostedQueryResponse | UsageSnapshot;
+type RouteName = "/games" | "/health" | "/query" | "/stats" | "unmatched";
 
 interface RequestOutcome {
   readonly status: number;
@@ -32,6 +34,7 @@ interface RequestOutcome {
 export interface ApiServer {
   readonly server: Server;
   readonly queries: QueryService;
+  readonly usage: UsageStats;
 }
 
 function errorResponse(code: ApiErrorCode, message: string): ApiErrorResponse {
@@ -63,7 +66,12 @@ function mediaType(request: IncomingMessage): string {
 
 function routeName(request: IncomingMessage): RouteName {
   const pathname = new URL(request.url ?? "/", "http://queryhost.invalid").pathname;
-  if (pathname === "/games" || pathname === "/health" || pathname === "/query") {
+  if (
+    pathname === "/games" ||
+    pathname === "/health" ||
+    pathname === "/query" ||
+    pathname === "/stats"
+  ) {
     return pathname;
   }
   return "unmatched";
@@ -159,6 +167,7 @@ async function routeRequest(
   requestId: string,
   config: ApiConfig,
   queries: QueryService,
+  usage: UsageStats,
   startedAt: number,
   now: Clock,
 ): Promise<RequestOutcome> {
@@ -205,6 +214,14 @@ async function routeRequest(
     return { status: 200 };
   }
 
+  if (url.pathname === "/stats") {
+    if (request.method !== "GET") {
+      return methodNotAllowed(response, requestId, "GET");
+    }
+    sendJson(response, 200, usage.snapshot(), requestId);
+    return { status: 200 };
+  }
+
   if (url.pathname === "/query") {
     if (request.method !== "POST") {
       return methodNotAllowed(response, requestId, "POST");
@@ -228,13 +245,15 @@ export function createApiServer(
   logger: Logger,
   now: Clock = Date.now,
 ): ApiServer {
-  const queries = new QueryService(config, executor, now);
+  const usage = new UsageStats(now);
+  const queries = new QueryService(config, executor, now, usage);
   const startedAt = now();
   const server = createServer((request, response) => {
     const requestId = randomUUID();
     const requestStartedAt = now();
-    void routeRequest(request, response, requestId, config, queries, startedAt, now)
+    void routeRequest(request, response, requestId, config, queries, usage, startedAt, now)
       .then((outcome) => {
+        usage.recordResponse(outcome.status);
         logger.info("http.request", {
           requestId,
           method: request.method ?? "",
@@ -247,6 +266,7 @@ export function createApiServer(
       })
       .catch(() => {
         logger.error("http.internal_error", { requestId });
+        usage.recordResponse(500);
         if (!response.headersSent) {
           sendJson(
             response,
@@ -264,5 +284,5 @@ export function createApiServer(
   server.headersTimeout = 5_000;
   server.keepAliveTimeout = 5_000;
   server.maxHeadersCount = 64;
-  return { server, queries };
+  return { server, queries, usage };
 }

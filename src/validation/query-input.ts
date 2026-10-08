@@ -19,7 +19,7 @@ const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
 ]);
 const MAX_HOST_LENGTH = 253;
 const MAX_HOSTED_TIMEOUT_MS = 5_000;
-const CACHE_SCHEMA = 1;
+const CACHE_SCHEMA = 2;
 
 type JsonPrimitive = boolean | number | string | null;
 type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -168,7 +168,12 @@ export function parseQueryInput(text: string): HostedQueryInput {
   };
 }
 
-/** Stable key containing every normalized field that can affect a hosted result. */
+/**
+ * Stable key for the normalized fields that shape a hosted result's content.
+ * The deadline is left out so callers with different `timeoutMs` values share
+ * cache entries and live work; `QueryService` and `ResultCache` apply the
+ * deadline when deciding whether a shared result is usable.
+ */
 export function queryCacheKey(input: HostedQueryInput): string {
   return JSON.stringify([
     CACHE_SCHEMA,
@@ -177,7 +182,6 @@ export function queryCacheKey(input: HostedQueryInput): string {
     input.port,
     input.queryPort,
     input.mode,
-    input.timeoutMs,
   ]);
 }
 

@@ -10,8 +10,15 @@ import type {
 import { queryCacheKey, queryDestinationKey } from "../validation/query-input.js";
 import { CapacityGate, type CapacitySnapshot } from "./capacity-gate.js";
 import { ResultCache, resultTtlMs, type CacheSnapshot } from "./result-cache.js";
+import { UsageStats } from "./usage-stats.js";
 
 type Clock = () => number;
+
+interface InFlightQuery {
+  readonly result: Promise<QueryResult>;
+  readonly timeoutMs: number;
+  readonly deadline: number;
+}
 
 export interface QueryServiceSnapshot {
   readonly capacity: CapacitySnapshot;
@@ -43,19 +50,29 @@ export class QueryService {
   readonly #cache: ResultCache;
   readonly #gate: CapacityGate;
   readonly #policy: ApiConfig["cache"];
-  readonly #inFlight = new Map<string, Promise<QueryResult>>();
+  readonly #usage: UsageStats;
+  readonly #now: Clock;
+  readonly #inFlight = new Map<string, InFlightQuery>();
 
-  public constructor(config: ApiConfig, executor: QueryExecutor, now: Clock = Date.now) {
+  public constructor(
+    config: ApiConfig,
+    executor: QueryExecutor,
+    now: Clock = Date.now,
+    usage: UsageStats = new UsageStats(now),
+  ) {
     this.#executor = executor;
     this.#cache = new ResultCache(config.cache, now);
     this.#gate = new CapacityGate(config.capacity, now);
     this.#policy = config.cache;
+    this.#usage = usage;
+    this.#now = now;
   }
 
   public async execute(input: HostedQueryInput): Promise<HostedQueryResponse> {
     const key = queryCacheKey(input);
-    const cached = this.#cache.get(key);
+    const cached = this.#cache.get(key, input.timeoutMs);
     if (cached !== undefined) {
+      this.#usage.recordQuery(input.game, "hit");
       return hostedResponse(cached.result, {
         status: "hit",
         ageMs: cached.ageMs,
@@ -63,9 +80,17 @@ export class QueryService {
       });
     }
 
+    const startedAt = this.#now();
     const shared = this.#inFlight.get(key);
-    if (shared !== undefined) {
-      const result = await shared;
+    // Join live work only when it had at least this caller's budget (so its
+    // failures apply here too) and still finishes within this caller's deadline.
+    if (
+      shared !== undefined &&
+      shared.timeoutMs >= input.timeoutMs &&
+      shared.deadline <= startedAt + input.timeoutMs
+    ) {
+      const result = await shared.result;
+      this.#usage.recordQuery(input.game, "coalesced");
       return hostedResponse(result, {
         status: "coalesced",
         ageMs: 0,
@@ -74,16 +99,26 @@ export class QueryService {
     }
 
     const execution = this.#gate.run(queryDestinationKey(input), () => this.#run(input, key));
-    this.#inFlight.set(key, execution);
+    const live: InFlightQuery = {
+      result: execution,
+      timeoutMs: input.timeoutMs,
+      deadline: startedAt + input.timeoutMs,
+    };
+    // Keep advertising the run with the larger budget: it is the one later
+    // callers can safely join.
+    if (shared === undefined || live.timeoutMs > shared.timeoutMs) {
+      this.#inFlight.set(key, live);
+    }
     try {
       const result = await execution;
+      this.#usage.recordQuery(input.game, "miss");
       return hostedResponse(result, {
         status: "miss",
         ageMs: 0,
         ttlMs: resultTtlMs(result, this.#policy),
       });
     } finally {
-      if (this.#inFlight.get(key) === execution) {
+      if (this.#inFlight.get(key) === live) {
         this.#inFlight.delete(key);
       }
     }
@@ -102,13 +137,15 @@ export class QueryService {
   }
 
   async #run(input: HostedQueryInput, key: string): Promise<QueryResult> {
+    const startedAt = this.#now();
     let result: QueryResult;
     try {
       result = await this.#executor(input);
     } catch {
       result = internalFailure(input.game);
     }
-    this.#cache.set(key, result);
+    this.#usage.recordLive(result, Math.max(0, this.#now() - startedAt));
+    this.#cache.set(key, result, input.timeoutMs);
     return result;
   }
 }
