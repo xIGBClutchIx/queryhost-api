@@ -70,6 +70,18 @@ describe("hosted query input", () => {
     ).toThrow("derived query port");
   });
 
+  it.each([
+    ["reforger", "arma-reforger", 2001, 17_777],
+    ["starbound", "starbound", 21_025, 21_025],
+    ["spaceengineers", "space-engineers", 27_016, 27_016],
+    ["humanitz", "humanitz", 7777, 27_015],
+    ["vrising", "v-rising", 9876, 9877],
+  ])("resolves %s to the 1.5.0 %s defaults", (alias, game, port, queryPort) => {
+    expect(
+      parseQueryInput(JSON.stringify({ game: alias, host: "play.example.com" })),
+    ).toMatchObject({ game, port, queryPort });
+  });
+
   it("keys the cache by result-shaping fields but not the deadline", () => {
     const base = parseQueryInput('{"game":"rust","host":"play.example.com"}');
     const equivalent = parseQueryInput(
