@@ -117,6 +117,10 @@ describe("portable HTTP API", () => {
     const gamesResponse = await fetch(`${baseUrl}/games`, { headers });
     const games = await parsed<GamesResponse>(gamesResponse);
     expect(games.games.map((game) => game.id)).toContain("minecraft-java");
+    expect(games.games.find((game) => game.id === "v-rising")).toMatchObject({
+      protocol: "a2s",
+      defaultPort: 9876,
+    });
 
     const wrongMethod = await fetch(`${baseUrl}/query`, { headers });
     expect(wrongMethod.status).toBe(405);
