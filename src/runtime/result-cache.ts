@@ -25,6 +25,7 @@ export interface CacheLookup {
 
 interface CacheEntry {
   readonly result: QueryResult;
+  readonly timeoutMs: number;
   readonly storedAt: number;
   readonly expiresAt: number;
   readonly ttlMs: number;
@@ -55,7 +56,13 @@ export class ResultCache {
     this.#now = now;
   }
 
-  public get(key: string): CacheLookup | undefined {
+  /**
+   * Returns a fresh entry usable by a caller with the given deadline. Keys
+   * omit the deadline, so a failure is reused only when it was produced with
+   * at least as much time as this caller allows; a shorter deadline's timeout
+   * says nothing about whether a longer one would succeed.
+   */
+  public get(key: string, timeoutMs: number): CacheLookup | undefined {
     const entry = this.#entries.get(key);
     if (entry === undefined) {
       return undefined;
@@ -66,15 +73,30 @@ export class ResultCache {
       this.#delete(key, entry);
       return undefined;
     }
+    if (!entry.result.ok && entry.timeoutMs < timeoutMs) {
+      return undefined;
+    }
 
     this.#entries.delete(key);
     this.#entries.set(key, entry);
     return { result: entry.result, ageMs: Math.max(0, now - entry.storedAt), ttlMs: entry.ttlMs };
   }
 
-  public set(key: string, result: QueryResult): number {
+  public set(key: string, result: QueryResult, timeoutMs: number): number {
     const ttlMs = resultTtlMs(result, this.#policy);
     if (ttlMs === 0) {
+      return 0;
+    }
+
+    const existing = this.#entries.get(key);
+    // Overlapping runs with different deadlines can finish in either order;
+    // a failure must not evict a fresh success that callers can still use.
+    if (
+      !result.ok &&
+      existing !== undefined &&
+      existing.result.ok &&
+      this.#now() < existing.expiresAt
+    ) {
       return 0;
     }
 
@@ -83,7 +105,6 @@ export class ResultCache {
       return 0;
     }
 
-    const existing = this.#entries.get(key);
     if (existing !== undefined) {
       this.#delete(key, existing);
     }
@@ -91,6 +112,7 @@ export class ResultCache {
     const storedAt = this.#now();
     this.#entries.set(key, {
       result,
+      timeoutMs,
       storedAt,
       expiresAt: storedAt + ttlMs,
       ttlMs,

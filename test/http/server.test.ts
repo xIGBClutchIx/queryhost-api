@@ -177,6 +177,35 @@ describe("portable HTTP API", () => {
     expect(executor).toHaveBeenCalledOnce();
   });
 
+  it("reports host-free usage counters to trusted callers only", async () => {
+    const { baseUrl } = await start(() => Promise.resolve(successfulResult()));
+    const headers = authorizedHeaders();
+
+    const unauthorized = await fetch(`${baseUrl}/stats`);
+    expect(unauthorized.status).toBe(401);
+
+    const request = (body: string): Promise<Response> =>
+      fetch(`${baseUrl}/query`, { method: "POST", headers, body });
+    await request('{"game":"rust","host":"private-target.example.com","timeoutMs":3000}');
+    await request('{"game":"rust","host":"private-target.example.com"}');
+    await request('{"game":"rust","host":"https://bad.example"}');
+
+    const response = await fetch(`${baseUrl}/stats`, { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    const text = await response.text();
+    expect(text).not.toContain("private-target");
+    expect(JSON.parse(text)).toMatchObject({
+      responses: { "200": 2, "400": 1, "401": 1 },
+      queries: { hit: 1, miss: 1, coalesced: 0 },
+      games: { rust: 2 },
+      live: { ok: 1, partial: 0, failed: 0, errors: {} },
+    });
+
+    const wrongMethod = await fetch(`${baseUrl}/stats`, { method: "POST", headers });
+    expect(wrongMethod.status).toBe(405);
+  });
+
   it("rejects unsupported media types and oversized bodies before execution", async () => {
     const executor = vi.fn(() => Promise.resolve(successfulResult()));
     const { baseUrl } = await start(executor, testConfig({ maxBodyBytes: 256 }));

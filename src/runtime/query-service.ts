@@ -10,8 +10,15 @@ import type {
 import { queryCacheKey, queryDestinationKey } from "../validation/query-input.js";
 import { CapacityGate, type CapacitySnapshot } from "./capacity-gate.js";
 import { ResultCache, resultTtlMs, type CacheSnapshot } from "./result-cache.js";
+import { UsageStats } from "./usage-stats.js";
 
 type Clock = () => number;
+
+interface InFlightQuery {
+  readonly result: Promise<QueryResult>;
+  readonly timeoutMs: number;
+  readonly deadline: number;
+}
 
 export interface QueryServiceSnapshot {
   readonly capacity: CapacitySnapshot;
@@ -43,19 +50,32 @@ export class QueryService {
   readonly #cache: ResultCache;
   readonly #gate: CapacityGate;
   readonly #policy: ApiConfig["cache"];
-  readonly #inFlight = new Map<string, Promise<QueryResult>>();
+  readonly #usage: UsageStats;
+  readonly #now: Clock;
+  // Each key can have several live runs with different deadlines; every one
+  // is an admitted capacity-gate task, so the lists stay bounded by capacity.
+  readonly #inFlight = new Map<string, InFlightQuery[]>();
+  #inFlightRuns = 0;
 
-  public constructor(config: ApiConfig, executor: QueryExecutor, now: Clock = Date.now) {
+  public constructor(
+    config: ApiConfig,
+    executor: QueryExecutor,
+    now: Clock = Date.now,
+    usage: UsageStats = new UsageStats(now),
+  ) {
     this.#executor = executor;
     this.#cache = new ResultCache(config.cache, now);
     this.#gate = new CapacityGate(config.capacity, now);
     this.#policy = config.cache;
+    this.#usage = usage;
+    this.#now = now;
   }
 
   public async execute(input: HostedQueryInput): Promise<HostedQueryResponse> {
     const key = queryCacheKey(input);
-    const cached = this.#cache.get(key);
+    const cached = this.#cache.get(key, input.timeoutMs);
     if (cached !== undefined) {
+      this.#usage.recordQuery(input.game, "hit");
       return hostedResponse(cached.result, {
         status: "hit",
         ageMs: cached.ageMs,
@@ -63,9 +83,16 @@ export class QueryService {
       });
     }
 
-    const shared = this.#inFlight.get(key);
+    const startedAt = this.#now();
+    const runs = this.#inFlight.get(key) ?? [];
+    // Join live work only when it had at least this caller's budget (so its
+    // failures apply here too) and still finishes within this caller's deadline.
+    const shared = runs.find(
+      (run) => run.timeoutMs >= input.timeoutMs && run.deadline <= startedAt + input.timeoutMs,
+    );
     if (shared !== undefined) {
-      const result = await shared;
+      const result = await shared.result;
+      this.#usage.recordQuery(input.game, "coalesced");
       return hostedResponse(result, {
         status: "coalesced",
         ageMs: 0,
@@ -74,18 +101,29 @@ export class QueryService {
     }
 
     const execution = this.#gate.run(queryDestinationKey(input), () => this.#run(input, key));
-    this.#inFlight.set(key, execution);
+    const live: InFlightQuery = {
+      result: execution,
+      timeoutMs: input.timeoutMs,
+      deadline: startedAt + input.timeoutMs,
+    };
+    this.#inFlight.set(key, [...runs, live]);
+    this.#inFlightRuns += 1;
     try {
       const result = await execution;
+      this.#usage.recordQuery(input.game, "miss");
       return hostedResponse(result, {
         status: "miss",
         ageMs: 0,
         ttlMs: resultTtlMs(result, this.#policy),
       });
     } finally {
-      if (this.#inFlight.get(key) === execution) {
+      const remaining = (this.#inFlight.get(key) ?? []).filter((run) => run !== live);
+      if (remaining.length === 0) {
         this.#inFlight.delete(key);
+      } else {
+        this.#inFlight.set(key, remaining);
       }
+      this.#inFlightRuns -= 1;
     }
   }
 
@@ -93,7 +131,7 @@ export class QueryService {
     return {
       capacity: this.#gate.snapshot(),
       cache: this.#cache.snapshot(),
-      inFlight: this.#inFlight.size,
+      inFlight: this.#inFlightRuns,
     };
   }
 
@@ -102,13 +140,15 @@ export class QueryService {
   }
 
   async #run(input: HostedQueryInput, key: string): Promise<QueryResult> {
+    const startedAt = this.#now();
     let result: QueryResult;
     try {
       result = await this.#executor(input);
     } catch {
       result = internalFailure(input.game);
     }
-    this.#cache.set(key, result);
+    this.#usage.recordLive(result, Math.max(0, this.#now() - startedAt));
+    this.#cache.set(key, result, input.timeoutMs);
     return result;
   }
 }

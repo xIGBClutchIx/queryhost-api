@@ -70,7 +70,7 @@ describe("hosted query input", () => {
     ).toThrow("derived query port");
   });
 
-  it("includes every result-affecting field in the stable cache key", () => {
+  it("keys the cache by result-shaping fields but not the deadline", () => {
     const base = parseQueryInput('{"game":"rust","host":"play.example.com"}');
     const equivalent = parseQueryInput(
       '{"game":"rust","host":" PLAY.EXAMPLE.COM. ","port":28015,"queryPort":28017,"mode":"full","timeoutMs":5000}',
@@ -83,7 +83,7 @@ describe("hosted query input", () => {
     expect(queryCacheKey(base)).toBe(queryCacheKey(equivalent));
     expect(queryCacheKey(minecraftAlias)).toBe(queryCacheKey(minecraftCanonical));
     expect(queryCacheKey(base)).not.toBe(queryCacheKey(summary));
-    expect(queryCacheKey(base)).not.toBe(queryCacheKey(shorter));
+    expect(queryCacheKey(base)).toBe(queryCacheKey(shorter));
     expect(queryDestinationKey(base)).toBe("play.example.com:28017");
   });
 

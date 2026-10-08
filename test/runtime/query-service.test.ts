@@ -4,7 +4,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { HostedQueryInput, QueryExecutor } from "../../src/contracts.js";
 import { CapacityRejectedError } from "../../src/runtime/capacity-gate.js";
 import { QueryService } from "../../src/runtime/query-service.js";
-import { deferred, rustInput, successfulResult, testConfig, testStartRate } from "../helpers.js";
+import { UsageStats } from "../../src/runtime/usage-stats.js";
+import {
+  deferred,
+  failedResult,
+  rustInput,
+  successfulResult,
+  testConfig,
+  testStartRate,
+} from "../helpers.js";
 
 describe("query service", () => {
   it("coalesces concurrent identical requests and then serves the cache", async () => {
@@ -117,5 +125,115 @@ describe("query service", () => {
     await Promise.all(accepted);
     expect(peakActive).toBe(2);
     expect(executor).toHaveBeenCalledTimes(5);
+  });
+
+  it("shares results across deadlines without serving a shorter deadline's failure", async () => {
+    const executor = vi.fn((input: HostedQueryInput): Promise<QueryResult> =>
+      Promise.resolve(input.timeoutMs < 5_000 ? failedResult("TIMEOUT") : successfulResult()),
+    );
+    const service = new QueryService(testConfig(), executor);
+
+    await expect(service.execute(rustInput("play.example.com", 3_000))).resolves.toMatchObject({
+      ok: false,
+      cache: { status: "miss" },
+    });
+    await expect(service.execute(rustInput("play.example.com", 1_000))).resolves.toMatchObject({
+      ok: false,
+      cache: { status: "hit" },
+    });
+    await expect(service.execute(rustInput())).resolves.toMatchObject({
+      ok: true,
+      cache: { status: "miss" },
+    });
+    await expect(service.execute(rustInput("play.example.com", 3_000))).resolves.toMatchObject({
+      ok: true,
+      cache: { status: "hit" },
+    });
+    expect(executor).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces only onto live work that fits the caller's deadline and budget", async () => {
+    let now = 0;
+    const executions: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const executor = vi.fn((): Promise<QueryResult> => {
+      const execution = deferred<QueryResult>();
+      executions.push(execution);
+      return execution.promise;
+    });
+    const config = testConfig({
+      capacity: { ...testConfig().capacity, maxPerDestination: 4 },
+    });
+    const service = new QueryService(config, executor, () => now);
+
+    const long = service.execute(rustInput("play.example.com", 5_000));
+    now = 500;
+    // Shorter budget, but the shared run could outlast this caller's deadline.
+    const short = service.execute(rustInput("play.example.com", 1_000));
+    // Same budget, ends after the in-flight run: safe to share.
+    const later = service.execute(rustInput("play.example.com", 5_000));
+    expect(executor).toHaveBeenCalledTimes(2);
+
+    for (const execution of executions) {
+      execution.resolve(successfulResult());
+    }
+    await expect(long).resolves.toMatchObject({ cache: { status: "miss" } });
+    await expect(short).resolves.toMatchObject({ cache: { status: "miss" } });
+    await expect(later).resolves.toMatchObject({ cache: { status: "coalesced" } });
+  });
+
+  it("counts cache outcomes, live results, and latency without recording targets", async () => {
+    let now = 0;
+    const usage = new UsageStats(() => now);
+    const executor = vi.fn((input: HostedQueryInput): Promise<QueryResult> => {
+      now += input.host === "slow.example.com" ? 6_000 : 80;
+      return Promise.resolve(
+        input.host === "slow.example.com" ? failedResult("TIMEOUT") : successfulResult(true),
+      );
+    });
+    const service = new QueryService(testConfig(), executor, () => now, usage);
+
+    await service.execute(rustInput());
+    await service.execute(rustInput());
+    await service.execute(rustInput("slow.example.com"));
+
+    const snapshot = usage.snapshot();
+    expect(snapshot).toMatchObject({
+      queries: { hit: 1, miss: 2, coalesced: 0 },
+      games: { rust: 3 },
+      live: { ok: 0, partial: 1, failed: 1, errors: { TIMEOUT: 1 } },
+    });
+    expect(snapshot.live.latencyMs[0]).toEqual({ le: 100, count: 1 });
+    expect(snapshot.live.latencyMs.at(-1)).toEqual({ le: null, count: 1 });
+    expect(JSON.stringify(snapshot)).not.toContain("example.com");
+  });
+
+  it("coalesces a burst of short-deadline requests behind a longer incompatible run", async () => {
+    let now = 0;
+    const executions: Array<ReturnType<typeof deferred<QueryResult>>> = [];
+    const executor = vi.fn((): Promise<QueryResult> => {
+      const execution = deferred<QueryResult>();
+      executions.push(execution);
+      return execution.promise;
+    });
+    const config = testConfig({
+      capacity: { ...testConfig().capacity, maxPerDestination: 4 },
+    });
+    const service = new QueryService(config, executor, () => now);
+
+    const long = service.execute(rustInput("play.example.com", 5_000));
+    now = 100;
+    const shorts = Array.from({ length: 3 }, () =>
+      service.execute(rustInput("play.example.com", 3_000)),
+    );
+    expect(executor).toHaveBeenCalledTimes(2);
+    expect(service.snapshot().inFlight).toBe(2);
+
+    for (const execution of executions) {
+      execution.resolve(successfulResult());
+    }
+    await expect(long).resolves.toMatchObject({ cache: { status: "miss" } });
+    const statuses = (await Promise.all(shorts)).map((result) => result.cache.status);
+    expect(statuses).toEqual(["miss", "coalesced", "coalesced"]);
+    expect(service.snapshot().inFlight).toBe(0);
   });
 });
