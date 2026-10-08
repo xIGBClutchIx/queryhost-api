@@ -18,7 +18,7 @@ The service owns short in-memory caching, identical-request coalescing, global a
 
 ## Development
 
-The API is pinned to the exact public `queryhost@1.5.0` registry release. Install dependencies and run the complete gate with:
+The API is pinned to the exact public `queryhost@1.5.1` registry release. Install dependencies and run the complete gate with:
 
 ```bash
 cd queryhost-api
@@ -74,4 +74,4 @@ See [docs/API.md](docs/API.md) for the HTTP contract and [docs/Operations.md](do
 
 The private Railway deployment is healthy with one 0.5 vCPU, 0.5 GB replica, no public domain, and workspace compute limits at a $5 alert and $10 hard shutdown. Browser traffic reaches it only through the public web service's validated and throttled server route.
 
-The API imports only the public package-root exports from exact `queryhost@1.5.0`. The web service calls this API through `api.railway.internal`; public caller limits stay at the web boundary.
+The API imports only the public package-root exports from exact `queryhost@1.5.1`. The web service calls this API through `api.railway.internal`; public caller limits stay at the web boundary.
