@@ -17,24 +17,30 @@ concurrency:
   group: queryhost-release
   cancel-in-progress: false
 
-permissions:
-  actions: write
-  contents: write
-  pull-requests: write
+permissions: {}
 
 env:
   COMMIT_TITLE: "chore: update queryhost to"
 
 jobs:
-  bump:
+  # Installing and importing the new release runs its code, so this job holds only a
+  # read token and does not persist it. The write job below never runs package code.
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.bump.outputs.changed }}
+      to: ${{ steps.bump.outputs.to }}
+      base: ${{ steps.bump.outputs.base }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       # Most scheduled runs find nothing new, so compare versions before installing anything.
       - name: Check for a newer release
@@ -67,59 +73,99 @@ jobs:
         if: steps.check.outputs.newer == 'true'
         env:
           VERSION: ${{ inputs.version }}
-        run: node scripts/bump-queryhost.mjs $VERSION --body "$RUNNER_TEMP/body.md"
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          node scripts/bump-queryhost.mjs $VERSION --body "$RUNNER_TEMP/body.md"
+
+      - name: Bundle the changed files
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bump/files"
+          cp "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/bump/body.md"
+          git diff --name-only > "$RUNNER_TEMP/bump/changed.txt"
+          while IFS= read -r file; do
+            mkdir -p "$RUNNER_TEMP/bump/files/$(dirname "$file")"
+            cp "$file" "$RUNNER_TEMP/bump/files/$file"
+          done < "$RUNNER_TEMP/bump/changed.txt"
+
+      - name: Upload the bump
+        if: steps.bump.outputs.changed == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
+          retention-days: 1
+
+  open:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Download the bump
+        uses: actions/download-artifact@v5
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
 
       - name: Open the pull request
-        if: steps.bump.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TO: ${{ steps.bump.outputs.to }}
+          GH_REPO: ${{ github.repository }}
+          TO: ${{ needs.prepare.outputs.to }}
+          BASE: ${{ needs.prepare.outputs.base }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        working-directory: ${{ runner.temp }}/bump
         run: |
           branch="queryhost/v$TO"
-          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+          if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
             # A pull request in any state means a person has it; a branch without one was
             # left by a failed run, so start it over.
             if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
               echo "$branch already has a pull request; leaving it alone."
               exit 0
             fi
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
           fi
           if [ -n "$(gh pr list --state open --search "\"queryhost to $TO\" in:title" --json number --jq '.[].number')" ]; then
             echo "A pull request for queryhost $TO is already open."
             exit 0
           fi
 
-          base="$(git rev-parse HEAD)"
-          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$branch" -f sha="$base" > /dev/null
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$BASE" > /dev/null
 
           # Commit through the API so GitHub signs it; the runner holds no signing key.
           jq -n \
             --arg query 'mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }' \
-            --arg repo "$GITHUB_REPOSITORY" \
+            --arg repo "$GH_REPO" \
             --arg branch "$branch" \
-            --arg head "$base" \
+            --arg head "$BASE" \
             --arg headline "$COMMIT_TITLE $TO" \
             '{query: $query, variables: {input: {
               branch: {repositoryNameWithOwner: $repo, branchName: $branch},
               expectedHeadOid: $head,
               message: {headline: $headline},
               fileChanges: {additions: []}
-            }}}' > "$RUNNER_TEMP/commit.json"
-          git diff --name-only | while IFS= read -r file; do
-            base64 -w0 "$file" > "$RUNNER_TEMP/contents"
-            jq --arg path "$file" --rawfile contents "$RUNNER_TEMP/contents" \
+            }}}' > commit.json
+          while IFS= read -r file; do
+            base64 -w0 "files/$file" > contents.b64
+            jq --arg path "$file" --rawfile contents contents.b64 \
               '.variables.input.fileChanges.additions += [{path: $path, contents: $contents}]' \
-              "$RUNNER_TEMP/commit.json" > "$RUNNER_TEMP/next.json"
-            mv "$RUNNER_TEMP/next.json" "$RUNNER_TEMP/commit.json"
-          done
-          gh api graphql --input "$RUNNER_TEMP/commit.json" > /dev/null
+              commit.json > next.json
+            mv next.json commit.json
+          done < changed.txt
+          gh api graphql --input commit.json > /dev/null
 
           gh pr create \
-            --base "${{ github.event.repository.default_branch }}" \
+            --base "$DEFAULT_BRANCH" \
             --head "$branch" \
             --title "$COMMIT_TITLE $TO" \
-            --body-file "$RUNNER_TEMP/body.md" \
+            --body-file body.md \
             --assignee "$GITHUB_REPOSITORY_OWNER"
 
           # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows,
