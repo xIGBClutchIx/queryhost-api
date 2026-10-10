@@ -13,6 +13,9 @@ updates:
     ignore:
       # Library releases are rolled out by hand: publish, then API, then web.
       - dependency-name: queryhost
+      # @types/node tracks the Node.js 24 runtime; bump it with the engines field.
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /
