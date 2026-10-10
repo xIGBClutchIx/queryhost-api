@@ -1,11 +1,11 @@
 name: QueryHost release
 
 # Opens a pull request that moves the exact `queryhost` pin to a newer npm release.
-# The library's publish workflow dispatches this right after `npm publish`; the hourly
-# schedule catches a release when that dispatch is not configured. Merging stays manual.
+# The schedule picks a release up within 15 minutes; run it by hand to start sooner.
+# Merging stays manual because it deploys.
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       version:
@@ -34,20 +34,35 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      # Most scheduled runs find nothing new, so compare versions before installing anything.
+      - name: Check for a newer release
+        id: check
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          pinned="$(node -p 'require("./package.json").dependencies.queryhost')"
+          target="${VERSION:-$(npm view queryhost version)}"
+          echo "pinned $pinned, target $target"
+          if [ "$target" = "$pinned" ]; then echo "newer=false" >> "$GITHUB_OUTPUT"; else echo "newer=true" >> "$GITHUB_OUTPUT"; fi
+
       - name: Set up Node.js
+        if: steps.check.outputs.newer == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
 
       - name: Use repository npm version
+        if: steps.check.outputs.newer == 'true'
         run: npm install --global npm@12.0.2
 
       - name: Install dependencies
+        if: steps.check.outputs.newer == 'true'
         run: npm ci --ignore-scripts
 
       - name: Move the queryhost pin
         id: bump
+        if: steps.check.outputs.newer == 'true'
         env:
           VERSION: ${{ inputs.version }}
         run: node scripts/bump-queryhost.mjs $VERSION --body "$RUNNER_TEMP/body.md"
