@@ -40,6 +40,12 @@ railway usage limit status --target workspace
 
 Record the measured CPU and memory peaks before changing the initial replica limits. Replica limits bound worst-case service consumption; they do not reduce billing below actual usage.
 
+## Library releases
+
+This service pins an exact `queryhost` version. The `QueryHost release` workflow opens the pull request that moves the pin: it checks npm every 15 minutes, and running it by hand from the Actions tab, optionally with a version, starts it at once. The same change runs locally with `node scripts/bump-queryhost.mjs [version]`.
+
+The pull request carries the pin, the lockfile, prose that names the old pin, the library changelog entries, and any new game IDs. GitHub does not start pull-request workflows for pull requests opened by `GITHUB_TOKEN`, so the workflow dispatches CI on the branch itself. It needs **Allow GitHub Actions to create and approve pull requests** enabled under Settings, Actions, General. Merging still deploys, so review and merge it by hand.
+
 ## Logs and health
 
 Logs are newline-delimited JSON containing event names, request IDs, a fixed route name, method, status, duration, canonical game ID, and cache status where applicable. Unknown paths are recorded only as `unmatched`. Logs intentionally omit target hosts, request bodies, player data, secrets, and exception contents.
