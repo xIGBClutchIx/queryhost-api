@@ -86,7 +86,7 @@ jobs:
 
       - name: Upload the bump
         if: steps.bump.outputs.changed == 'true'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: queryhost-bump
           path: ${{ runner.temp }}/bump
