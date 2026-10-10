@@ -1,13 +1,19 @@
-import type { GameId, QueryResult } from "queryhost";
+import { detect, type DetectResult, type GameId, type QueryResult } from "queryhost";
 
 import type { ApiConfig } from "../config.js";
 import type {
   CacheMetadata,
+  DetectExecutor,
+  HostedDetectInput,
   HostedQueryInput,
   HostedQueryResponse,
   QueryExecutor,
 } from "../contracts.js";
-import { queryCacheKey, queryDestinationKey } from "../validation/query-input.js";
+import {
+  detectDestinationKey,
+  queryCacheKey,
+  queryDestinationKey,
+} from "../validation/query-input.js";
 import { CapacityGate, type CapacitySnapshot } from "./capacity-gate.js";
 import { QueryProgress, type ProgressListener } from "./query-progress.js";
 import { ResultCache, resultTtlMs, type CacheSnapshot } from "./result-cache.js";
@@ -46,9 +52,16 @@ function hostedResponse(result: QueryResult, cache: CacheMetadata): HostedQueryR
   return { ...result, cache };
 }
 
+// Detections end with a typed query of the detected game unless a probe already answered in the
+// requested mode, so each is charged one start per probe plus that query.
+function detectionCost(input: HostedDetectInput): number {
+  return input.maxProbes + 1;
+}
+
 /** Coordinates cache lookup, in-flight sharing, capacity admission, and live library queries. */
 export class QueryService {
   readonly #executor: QueryExecutor;
+  readonly #detector: DetectExecutor;
   readonly #cache: ResultCache;
   readonly #gate: CapacityGate;
   readonly #policy: ApiConfig["cache"];
@@ -64,8 +77,10 @@ export class QueryService {
     executor: QueryExecutor,
     now: Clock = Date.now,
     usage: UsageStats = new UsageStats(now),
+    detector: DetectExecutor = detect,
   ) {
     this.#executor = executor;
+    this.#detector = detector;
     this.#cache = new ResultCache(config.cache, now);
     this.#gate = new CapacityGate(config.capacity, now);
     this.#policy = config.cache;
@@ -148,6 +163,23 @@ export class QueryService {
       }
       this.#inFlightRuns -= 1;
     }
+  }
+
+  /**
+   * Runs one live detection through the same capacity gate as queries, charged for every probe it
+   * may send. Detections are never cached or shared: their probes depend on the caller's deadline.
+   */
+  public async detect(input: HostedDetectInput): Promise<DetectResult> {
+    const result = await this.#gate.runCharged(
+      detectDestinationKey(input),
+      () => this.#detector(input),
+      {
+        cost: detectionCost(input),
+        refundable: (detected) => !detected.ok && detected.error.code === "TARGET_BLOCKED",
+      },
+    );
+    this.#usage.recordDetection(result);
+    return result;
   }
 
   public snapshot(): QueryServiceSnapshot {

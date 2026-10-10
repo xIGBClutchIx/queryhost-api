@@ -56,4 +56,22 @@ describe("runtime configuration", () => {
       }),
     ).toThrow("QUERYHOST_MAX_STARTS_PER_DESTINATION");
   });
+
+  it("fits the detection probe budget inside one destination's start window", () => {
+    const token = { QUERYHOST_ORIGIN_TOKEN: "a".repeat(32) };
+    expect(loadConfig(token).detectMaxProbes).toBe(4);
+    expect(
+      loadConfig({ ...token, QUERYHOST_MAX_STARTS_PER_DESTINATION: "3" }).detectMaxProbes,
+    ).toBe(2);
+    expect(loadConfig({ ...token, QUERYHOST_DETECT_MAX_PROBES: "5" }).detectMaxProbes).toBe(5);
+    expect(() => loadConfig({ ...token, QUERYHOST_DETECT_MAX_PROBES: "6" })).toThrow(
+      "QUERYHOST_DETECT_MAX_PROBES",
+    );
+    expect(() => loadConfig({ ...token, QUERYHOST_MAX_STARTS_PER_DESTINATION: "1" })).toThrow(
+      "QUERYHOST_DETECT_MAX_PROBES",
+    );
+    expect(() => loadConfig({ ...token, QUERYHOST_DETECT_MAX_PROBES: "17" })).toThrow(
+      "QUERYHOST_DETECT_MAX_PROBES",
+    );
+  });
 });

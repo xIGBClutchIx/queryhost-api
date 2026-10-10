@@ -7,11 +7,14 @@ import { QueryService } from "../../src/runtime/query-service.js";
 import { UsageStats } from "../../src/runtime/usage-stats.js";
 import {
   deferred,
+  detectInput,
+  detectedResult,
   failedResult,
   rustInput,
   successfulResult,
   testConfig,
   testStartRate,
+  undetectedResult,
 } from "../helpers.js";
 
 describe("query service", () => {
@@ -304,5 +307,48 @@ describe("query service", () => {
     const statuses = (await Promise.all(shorts)).map((result) => result.cache.status);
     expect(statuses).toEqual(["miss", "coalesced", "coalesced"]);
     expect(service.snapshot().inFlight).toBe(0);
+  });
+
+  it("charges detections per probe without caching them", async () => {
+    const usage = new UsageStats();
+    const detector = vi.fn(() => Promise.resolve(detectedResult()));
+    const config = testConfig({
+      capacity: { ...testConfig().capacity, startRate: testStartRate({ maxStarts: 10 }) },
+    });
+    const service = new QueryService(
+      config,
+      () => Promise.resolve(successfulResult()),
+      Date.now,
+      usage,
+      detector,
+    );
+
+    await expect(service.detect(detectInput())).resolves.toMatchObject({ ok: true, game: "rust" });
+    await expect(service.detect(detectInput())).resolves.toMatchObject({ ok: true });
+    expect(detector).toHaveBeenCalledTimes(2);
+    expect(service.snapshot().capacity.rate.startsInWindow).toBe(10);
+    await expect(service.detect(detectInput("other.example.com"))).rejects.toBeInstanceOf(
+      CapacityRejectedError,
+    );
+    expect(usage.snapshot().detections).toEqual({ games: { rust: 2 }, failed: 0, errors: {} });
+  });
+
+  it("refunds detections of blocked targets and records failures", async () => {
+    const usage = new UsageStats();
+    const service = new QueryService(
+      testConfig(),
+      () => Promise.resolve(successfulResult()),
+      Date.now,
+      usage,
+      () => Promise.resolve(undetectedResult("TARGET_BLOCKED")),
+    );
+
+    await expect(service.detect(detectInput("10.0.0.1"))).resolves.toMatchObject({ ok: false });
+    expect(service.snapshot().capacity.rate.startsInWindow).toBe(0);
+    expect(usage.snapshot().detections).toEqual({
+      games: {},
+      failed: 1,
+      errors: { TARGET_BLOCKED: 1 },
+    });
   });
 });

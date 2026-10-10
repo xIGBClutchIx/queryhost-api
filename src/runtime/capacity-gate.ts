@@ -4,13 +4,25 @@ import type { CapacityConfig } from "../config.js";
 import { StartRateGate, type StartRateSnapshot } from "./start-rate-gate.js";
 
 type Clock = () => number;
-type QueryTask = () => Promise<QueryResult>;
 
 interface QueueEntry {
   readonly destination: string;
-  readonly task: QueryTask;
-  readonly resolve: (result: QueryResult) => void;
+  /** Starts the admitted work and settles its caller's promise; never rejects. */
+  /**
+   * Renews the entry's start-rate charge just before it starts. A refused renewal settles the
+   * caller's promise and returns false, and the entry is dropped without starting.
+   */
+  readonly renew: () => boolean;
+  readonly start: () => Promise<void>;
   readonly reject: (error: Error) => void;
+}
+
+/** How one unit of gated work is charged against the start-rate windows. */
+export interface CapacityCharge<T> {
+  /** Starts the work consumes in the rolling windows, such as one per detection probe. */
+  readonly cost: number;
+  /** Whether a finished task never reached the network, so its starts are refunded. */
+  readonly refundable: (result: T) => boolean;
 }
 
 export interface CapacitySnapshot {
@@ -18,6 +30,13 @@ export interface CapacitySnapshot {
   readonly queued: number;
   readonly rate: StartRateSnapshot;
 }
+
+// The library rejects blocked targets before sending any game-query packet. Refunding them keeps
+// queries to private hosts from locking every caller out of the admission window.
+const QUERY_CHARGE: CapacityCharge<QueryResult> = {
+  cost: 1,
+  refundable: (result) => !result.ok && result.error.code === "TARGET_BLOCKED",
+};
 
 export class CapacityRejectedError extends Error {
   public readonly retryAfterSeconds: number;
@@ -48,7 +67,17 @@ export class CapacityGate {
     this.#startRate = new StartRateGate(config.startRate, now);
   }
 
-  public run(destination: string, task: QueryTask): Promise<QueryResult> {
+  /** Runs one live query, charged a single start. */
+  public run(destination: string, task: () => Promise<QueryResult>): Promise<QueryResult> {
+    return this.runCharged(destination, task, QUERY_CHARGE);
+  }
+
+  /** Runs gated work whose start-rate cost and refund rule the caller supplies. */
+  public runCharged<T>(
+    destination: string,
+    task: () => Promise<T>,
+    charge: CapacityCharge<T>,
+  ): Promise<T> {
     if (this.#closed) {
       return Promise.reject(new CapacityRejectedError("The query service is shutting down."));
     }
@@ -58,7 +87,7 @@ export class CapacityGate {
       return Promise.reject(new CapacityRejectedError());
     }
 
-    const admission = this.#startRate.admit(destination);
+    const admission = this.#startRate.admit(destination, charge.cost);
     if (!admission.admitted) {
       return Promise.reject(
         new CapacityRejectedError(
@@ -68,13 +97,11 @@ export class CapacityGate {
       );
     }
 
-    const startedAt = admission.startedAt;
-    const admittedTask = async (): Promise<QueryResult> => {
+    let startedAt = admission.startedAt;
+    const admittedTask = async (): Promise<T> => {
       const result = await task();
-      // The library rejects blocked targets before sending any game-query packet. Refunding them
-      // keeps queries to private hosts from locking every caller out of the admission window.
-      if (!result.ok && result.error.code === "TARGET_BLOCKED") {
-        this.#startRate.refund(destination, startedAt);
+      if (charge.refundable(result)) {
+        this.#startRate.refund(destination, startedAt, charge.cost);
       }
       return result;
     };
@@ -83,8 +110,24 @@ export class CapacityGate {
       return this.#start(destination, admittedTask);
     }
 
-    return new Promise<QueryResult>((resolve, reject) => {
-      this.#queue.push({ destination, task: admittedTask, resolve, reject });
+    return new Promise<T>((resolve, reject) => {
+      // Queued work may wait past its window, so its charge is renewed as it starts.
+      const renew = (): boolean => {
+        const renewed = this.#startRate.renew(destination, startedAt, charge.cost);
+        if (!renewed.admitted) {
+          reject(
+            new CapacityRejectedError(
+              "The query service admission rate is limited.",
+              renewed.retryAfterSeconds,
+            ),
+          );
+          return false;
+        }
+        startedAt = renewed.startedAt;
+        return true;
+      };
+      const start = (): Promise<void> => admittedTask().then(resolve, reject);
+      this.#queue.push({ destination, renew, start, reject });
       this.#drain();
     });
   }
@@ -128,7 +171,7 @@ export class CapacityGate {
     return Math.max(0, lastStart + this.#config.destinationCooldownMs - this.#now());
   }
 
-  #start(destination: string, task: QueryTask): Promise<QueryResult> {
+  #start<T>(destination: string, task: () => Promise<T>): Promise<T> {
     this.#active += 1;
     this.#activeByDestination.set(
       destination,
@@ -171,7 +214,9 @@ export class CapacityGate {
       const cooldown = this.#cooldownRemaining(entry.destination);
       if (destinationActive < this.#config.maxPerDestination && cooldown === 0) {
         this.#queue.splice(index, 1);
-        void this.#start(entry.destination, entry.task).then(entry.resolve, entry.reject);
+        if (entry.renew()) {
+          void this.#start(entry.destination, entry.start);
+        }
         continue;
       }
 

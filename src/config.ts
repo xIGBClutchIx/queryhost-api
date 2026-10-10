@@ -18,7 +18,11 @@ export interface ApiConfig {
   readonly maxBodyBytes: number;
   readonly capacity: CapacityConfig;
   readonly cache: CachePolicy;
+  /** Protocol and port pairs one hosted detection may probe. */
+  readonly detectMaxProbes: number;
 }
+
+const DEFAULT_DETECT_MAX_PROBES = 4;
 
 function integerEnvironment(
   environment: NodeJS.ProcessEnv,
@@ -79,6 +83,21 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiCon
   if (maxStartsPerDestination > maxStarts) {
     throw new RangeError(
       "QUERYHOST_MAX_STARTS_PER_DESTINATION cannot exceed QUERYHOST_MAX_STARTS_PER_WINDOW.",
+    );
+  }
+
+  // A detection is charged its probes plus the final query, so it must fit one destination's
+  // start window. The default shrinks to fit; a window too small for even one probe is an error.
+  const detectMaxProbes = integerEnvironment(
+    environment,
+    "QUERYHOST_DETECT_MAX_PROBES",
+    Math.max(1, Math.min(DEFAULT_DETECT_MAX_PROBES, maxStartsPerDestination - 1)),
+    1,
+    16,
+  );
+  if (detectMaxProbes + 1 > maxStartsPerDestination) {
+    throw new RangeError(
+      "QUERYHOST_DETECT_MAX_PROBES must be less than QUERYHOST_MAX_STARTS_PER_DESTINATION.",
     );
   }
 
@@ -148,5 +167,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiCon
         60_000,
       ),
     },
+    detectMaxProbes,
   };
 }

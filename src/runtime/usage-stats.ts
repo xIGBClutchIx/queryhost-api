@@ -1,4 +1,4 @@
-import type { GameId, QueryResult } from "queryhost";
+import type { DetectResult, GameId, QueryResult } from "queryhost";
 
 import type { CacheStatus } from "../contracts.js";
 
@@ -22,6 +22,12 @@ export interface UsageSnapshot {
     readonly failed: number;
     readonly errors: Readonly<Record<string, number>>;
     readonly latencyMs: readonly LatencyBucket[];
+  };
+  /** Hosted detections: detected games, and failure codes when none was identified. */
+  readonly detections: {
+    readonly games: Readonly<Record<string, number>>;
+    readonly failed: number;
+    readonly errors: Readonly<Record<string, number>>;
   };
 }
 
@@ -47,6 +53,9 @@ export class UsageStats {
   readonly #errors = new Map<string, number>();
   readonly #latency: number[] = Array.from({ length: LATENCY_BUCKETS_MS.length + 1 }, () => 0);
   readonly #queries: Record<CacheStatus, number> = { hit: 0, miss: 0, coalesced: 0 };
+  readonly #detectedGames = new Map<string, number>();
+  readonly #detectErrors = new Map<string, number>();
+  #detectFailed = 0;
   #ok = 0;
   #partial = 0;
   #failed = 0;
@@ -80,6 +89,15 @@ export class UsageStats {
     this.#latency[bucket] = (this.#latency[bucket] ?? 0) + 1;
   }
 
+  public recordDetection(result: DetectResult): void {
+    if (result.ok) {
+      increment(this.#detectedGames, result.game);
+    } else {
+      this.#detectFailed += 1;
+      increment(this.#detectErrors, result.error.code);
+    }
+  }
+
   public snapshot(): UsageSnapshot {
     return {
       startedAt: new Date(this.#startedAt).toISOString(),
@@ -95,6 +113,11 @@ export class UsageStats {
           le: LATENCY_BUCKETS_MS[index] ?? null,
           count,
         })),
+      },
+      detections: {
+        games: sorted(this.#detectedGames),
+        failed: this.#detectFailed,
+        errors: sorted(this.#detectErrors),
       },
     };
   }

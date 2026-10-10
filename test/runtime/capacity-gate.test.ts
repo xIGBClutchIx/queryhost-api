@@ -158,4 +158,79 @@ describe("capacity gate", () => {
       CapacityRejectedError,
     );
   });
+
+  it("charges custom work its cost and refunds it by the caller's rule", async () => {
+    const gate = new CapacityGate({
+      maxActive: 2,
+      maxQueued: 0,
+      maxPerDestination: 1,
+      destinationCooldownMs: 0,
+      startRate: testStartRate({ maxStarts: 6 }),
+    });
+    const charge = { cost: 4, refundable: (value: string) => value === "blocked" };
+
+    await expect(gate.runCharged("one", () => Promise.resolve("blocked"), charge)).resolves.toBe(
+      "blocked",
+    );
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 0 });
+    await expect(gate.runCharged("one", () => Promise.resolve("ok"), charge)).resolves.toBe("ok");
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 4 });
+    const task = vi.fn(() => Promise.resolve("ok"));
+    await expect(gate.runCharged("two", task, charge)).rejects.toBeInstanceOf(
+      CapacityRejectedError,
+    );
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it("renews a queued charge when it starts and refuses one that expired while queued", async () => {
+    vi.useFakeTimers();
+    const gate = new CapacityGate({
+      maxActive: 4,
+      maxQueued: 4,
+      maxPerDestination: 1,
+      destinationCooldownMs: 1_500,
+      startRate: testStartRate({ windowMs: 1_000, maxStarts: 2 }),
+    });
+    const ok = (): Promise<QueryResult> => Promise.resolve(successfulResult());
+    await expect(gate.run("one", ok)).resolves.toMatchObject({ ok: true });
+    const queuedTask = vi.fn(ok);
+    const queued = expect(gate.run("one", queuedTask)).rejects.toBeInstanceOf(
+      CapacityRejectedError,
+    );
+    expect(gate.snapshot()).toMatchObject({ queued: 1, rate: { startsInWindow: 2 } });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(gate.run("two", ok)).resolves.toMatchObject({ ok: true });
+    await expect(gate.run("three", ok)).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await queued;
+    expect(queuedTask).not.toHaveBeenCalled();
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 2 });
+
+    // The refused entry never started, so it left no cooldown behind for its destination.
+    await vi.advanceTimersByTimeAsync(500);
+    const next = gate.run("one", ok);
+    expect(gate.snapshot()).toMatchObject({ active: 1, queued: 0 });
+    await expect(next).resolves.toMatchObject({ ok: true });
+  });
+
+  it("keeps a queued charge in the window from the moment its work starts", async () => {
+    vi.useFakeTimers();
+    const gate = new CapacityGate({
+      maxActive: 4,
+      maxQueued: 4,
+      maxPerDestination: 1,
+      destinationCooldownMs: 500,
+      startRate: testStartRate({ windowMs: 1_000, maxStarts: 4 }),
+    });
+    const ok = (): Promise<QueryResult> => Promise.resolve(successfulResult());
+    await gate.run("one", ok);
+    const queued = gate.runCharged("one", ok, { cost: 2, refundable: () => false });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(queued).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(600);
+    // The first start has expired; the renewed charge from t=500 is still counted.
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 2 });
+  });
 });

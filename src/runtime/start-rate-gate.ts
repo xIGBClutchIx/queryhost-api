@@ -31,11 +31,19 @@ export class StartRateGate {
     this.#now = now;
   }
 
-  public admit(destination: string): StartRateDecision {
+  /**
+   * Admits work that costs `cost` starts against both windows at once. Detection, which probes
+   * several protocols for one target, pays one start per probe it may send.
+   */
+  public admit(destination: string, cost = 1): StartRateDecision {
     const now = this.#now();
     this.#prune(this.#globalStarts, now);
-    if (this.#globalStarts.length >= this.#policy.maxStarts) {
-      return { admitted: false, retryAfterSeconds: this.#retryAfter(this.#globalStarts, now) };
+    const globalExcess = this.#globalStarts.length + cost - this.#policy.maxStarts;
+    if (globalExcess > 0) {
+      return {
+        admitted: false,
+        retryAfterSeconds: this.#retryAfter(this.#globalStarts, now, globalExcess),
+      };
     }
 
     let destinationStarts = this.#startsByDestination.get(destination);
@@ -48,8 +56,12 @@ export class StartRateGate {
     }
 
     if (destinationStarts !== undefined) {
-      if (destinationStarts.length >= this.#policy.maxStartsPerDestination) {
-        return { admitted: false, retryAfterSeconds: this.#retryAfter(destinationStarts, now) };
+      const excess = destinationStarts.length + cost - this.#policy.maxStartsPerDestination;
+      if (excess > 0) {
+        return {
+          admitted: false,
+          retryAfterSeconds: this.#retryAfter(destinationStarts, now, excess),
+        };
       }
     } else {
       this.#pruneDestinations(now);
@@ -60,8 +72,35 @@ export class StartRateGate {
       this.#startsByDestination.set(destination, destinationStarts);
     }
 
-    this.#globalStarts.push(now);
-    destinationStarts.push(now);
+    for (let start = 0; start < cost; start += 1) {
+      this.#globalStarts.push(now);
+      destinationStarts.push(now);
+    }
+    return { admitted: true, startedAt: now };
+  }
+
+  /**
+   * Moves a queued admission's charge to the moment its work actually starts, so the starts stay
+   * in the window for as long as the work runs. A charge that expired while queued is admitted
+   * again, and the work must not start when that is refused.
+   */
+  public renew(destination: string, startedAt: number, cost = 1): StartRateDecision {
+    const now = this.#now();
+    this.#prune(this.#globalStarts, now);
+    const destinationStarts = this.#startsByDestination.get(destination);
+    if (destinationStarts !== undefined) {
+      this.#prune(destinationStarts, now);
+    }
+    const charged = this.#globalStarts.filter((start) => start === startedAt).length;
+    if (charged < cost || destinationStarts === undefined) {
+      return this.admit(destination, cost);
+    }
+    for (let start = 0; start < cost; start += 1) {
+      this.#remove(this.#globalStarts, startedAt);
+      this.#remove(destinationStarts, startedAt);
+      this.#globalStarts.push(now);
+      destinationStarts.push(now);
+    }
     return { admitted: true, startedAt: now };
   }
 
@@ -71,22 +110,28 @@ export class StartRateGate {
    * `maxStarts`, so executor calls stay bounded; beyond it the admission stays spent. Expired or
    * cleared admissions are ignored.
    */
-  public refund(destination: string, startedAt: number): void {
+  public refund(destination: string, startedAt: number, cost = 1): void {
     const now = this.#now();
     this.#prune(this.#refunds, now);
-    if (this.#refunds.length >= this.#policy.maxStarts) {
+    this.#prune(this.#globalStarts, now);
+    // A multi-start admission is refunded whole or not at all, so a blocked detection never
+    // leaves part of its charge behind.
+    if (this.#refunds.length + cost > this.#policy.maxStarts) {
       return;
     }
-    if (!this.#remove(this.#globalStarts, startedAt)) {
+    const charged = this.#globalStarts.filter((start) => start === startedAt).length;
+    if (charged < cost) {
       return;
     }
-    this.#refunds.push(now);
     const destinationStarts = this.#startsByDestination.get(destination);
-    if (destinationStarts === undefined) {
-      return;
+    for (let start = 0; start < cost; start += 1) {
+      this.#remove(this.#globalStarts, startedAt);
+      this.#refunds.push(now);
+      if (destinationStarts !== undefined) {
+        this.#remove(destinationStarts, startedAt);
+      }
     }
-    this.#remove(destinationStarts, startedAt);
-    if (destinationStarts.length === 0) {
+    if (destinationStarts?.length === 0) {
       this.#startsByDestination.delete(destination);
     }
   }
@@ -142,8 +187,9 @@ export class StartRateGate {
     }
   }
 
-  #retryAfter(starts: readonly number[], now: number): number {
-    const oldest = starts[0];
+  /** Seconds until `needed` of the oldest starts have left the window. */
+  #retryAfter(starts: readonly number[], now: number, needed = 1): number {
+    const oldest = starts[Math.min(needed, starts.length) - 1];
     if (oldest === undefined) {
       return 1;
     }
