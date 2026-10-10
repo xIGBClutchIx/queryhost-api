@@ -52,15 +52,14 @@ function hostedResponse(result: QueryResult, cache: CacheMetadata): HostedQueryR
 
 // Detections end with a typed query of the detected game unless a probe already answered in the
 // requested mode, so each is charged one start per probe plus that query.
-function detectionCost(input: HostedDetectInput, maxStartsPerDestination: number): number {
-  return Math.min(input.maxProbes + 1, maxStartsPerDestination);
+function detectionCost(input: HostedDetectInput): number {
+  return input.maxProbes + 1;
 }
 
 /** Coordinates cache lookup, in-flight sharing, capacity admission, and live library queries. */
 export class QueryService {
   readonly #executor: QueryExecutor;
   readonly #detector: DetectExecutor;
-  readonly #maxStartsPerDestination: number;
   readonly #cache: ResultCache;
   readonly #gate: CapacityGate;
   readonly #policy: ApiConfig["cache"];
@@ -80,7 +79,6 @@ export class QueryService {
   ) {
     this.#executor = executor;
     this.#detector = detector;
-    this.#maxStartsPerDestination = config.capacity.startRate.maxStartsPerDestination;
     this.#cache = new ResultCache(config.cache, now);
     this.#gate = new CapacityGate(config.capacity, now);
     this.#policy = config.cache;
@@ -153,7 +151,7 @@ export class QueryService {
       detectDestinationKey(input),
       () => this.#detector(input),
       {
-        cost: detectionCost(input, this.#maxStartsPerDestination),
+        cost: detectionCost(input),
         refundable: (detected) => !detected.ok && detected.error.code === "TARGET_BLOCKED",
       },
     );

@@ -87,7 +87,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiCon
   }
 
   // A detection is charged its probes plus the final query, so it must fit one destination's
-  // start window. The default shrinks to fit; an explicit value that cannot fit is an error.
+  // start window. The default shrinks to fit; a window too small for even one probe is an error.
   const detectMaxProbes = integerEnvironment(
     environment,
     "QUERYHOST_DETECT_MAX_PROBES",
@@ -95,10 +95,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ApiCon
     1,
     16,
   );
-  if (
-    environment["QUERYHOST_DETECT_MAX_PROBES"] !== undefined &&
-    detectMaxProbes + 1 > maxStartsPerDestination
-  ) {
+  if (detectMaxProbes + 1 > maxStartsPerDestination) {
     throw new RangeError(
       "QUERYHOST_DETECT_MAX_PROBES must be less than QUERYHOST_MAX_STARTS_PER_DESTINATION.",
     );

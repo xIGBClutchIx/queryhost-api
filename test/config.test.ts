@@ -67,6 +67,9 @@ describe("runtime configuration", () => {
     expect(() => loadConfig({ ...token, QUERYHOST_DETECT_MAX_PROBES: "6" })).toThrow(
       "QUERYHOST_DETECT_MAX_PROBES",
     );
+    expect(() => loadConfig({ ...token, QUERYHOST_MAX_STARTS_PER_DESTINATION: "1" })).toThrow(
+      "QUERYHOST_DETECT_MAX_PROBES",
+    );
     expect(() => loadConfig({ ...token, QUERYHOST_DETECT_MAX_PROBES: "17" })).toThrow(
       "QUERYHOST_DETECT_MAX_PROBES",
     );
