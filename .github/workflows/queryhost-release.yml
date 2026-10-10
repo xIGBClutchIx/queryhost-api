@@ -1,0 +1,236 @@
+name: QueryHost release
+
+# Opens a pull request that moves the exact `queryhost` pin to a newer npm release.
+# The schedule picks a release up within 15 minutes; run it by hand to start sooner.
+# Merging stays manual because it deploys.
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: queryhost version to pin (defaults to the npm latest tag)
+        required: false
+        type: string
+
+concurrency:
+  group: queryhost-release
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  COMMIT_TITLE: "chore: update queryhost to"
+
+jobs:
+  # Installing and importing the new release runs its code, so this job holds only a
+  # read token and does not persist it. The write job below never runs package code.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.bump.outputs.changed }}
+      to: ${{ steps.bump.outputs.to }}
+      base: ${{ steps.bump.outputs.base }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # Most scheduled runs find nothing new, so compare versions before installing anything.
+      - name: Check for a newer release
+        id: check
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          pinned="$(node -p 'require("./package.json").dependencies.queryhost')"
+          target="${VERSION:-$(npm view queryhost version)}"
+          echo "pinned $pinned, target $target"
+          if [ "$target" = "$pinned" ]; then echo "newer=false" >> "$GITHUB_OUTPUT"; else echo "newer=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up Node.js
+        if: steps.check.outputs.newer == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Use repository npm version
+        if: steps.check.outputs.newer == 'true'
+        run: npm install --global npm@12.0.2
+
+      - name: Install dependencies
+        if: steps.check.outputs.newer == 'true'
+        run: npm ci --ignore-scripts
+
+      - name: Move the queryhost pin
+        id: bump
+        if: steps.check.outputs.newer == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          node scripts/bump-queryhost.mjs $VERSION --body "$RUNNER_TEMP/body.md"
+
+      - name: Bundle the changed file names and PR body
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bump"
+          cp "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/bump/body.md"
+          git diff --name-only > "$RUNNER_TEMP/bump/changed.txt"
+
+      - name: Upload the bump
+        if: steps.bump.outputs.changed == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
+          retention-days: 1
+
+  open:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Use repository npm version
+        run: npm install --global npm@12.0.2
+
+      - name: Download the bump
+        uses: actions/download-artifact@v5
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TO: ${{ needs.prepare.outputs.to }}
+          PREPARED_BASE: ${{ needs.prepare.outputs.base }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        working-directory: ${{ runner.temp }}/bump
+        run: |
+          # Outputs from the prepare job are as untrusted as its files, so resolve the base here
+          # and leave a moved default branch to the next run.
+          BASE="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+          if [ "$BASE" != "$PREPARED_BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved since the bump was prepared; the next run retries."
+            exit 0
+          fi
+
+          if ! [[ "$TO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not an exact release version: $TO"
+            exit 1
+          fi
+
+          # The bundle comes from a job that ran the new release's code, so only its file names
+          # and PR body cross over. Every committed file is rebuilt here from the base commit,
+          # and dependencies are resolved from metadata only, so no package code runs here.
+          allowed='^([A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
+          grep -vxE 'package\.json|package-lock\.json' changed.txt > prose-files.txt || true
+          mkdir trusted trusted/docs
+          raw() {
+            gh api -H "Accept: application/vnd.github.raw+json" "repos/$GH_REPO/contents/$1?ref=$BASE"
+          }
+          raw package.json > trusted/package.json
+          raw package-lock.json > trusted/package-lock.json
+          FROM="$(jq -r .dependencies.queryhost trusted/package.json)"
+          : > commit-files.txt
+          while IFS= read -r file; do
+            if ! [[ "$file" =~ $allowed ]]; then
+              echo "::error::Unexpected file in the bump: $file"
+              exit 1
+            fi
+            # Only phrases that name the old pin change, as in scripts/bump-queryhost.mjs.
+            raw "$file" \
+              | jq -Rjs --arg from "$FROM" --arg to "$TO" \
+                'split("queryhost@" + $from) | join("queryhost@" + $to)
+                | split("`queryhost` " + $from) | join("`queryhost` " + $to)' \
+              > "trusted/$file.next"
+            raw "$file" > "trusted/$file"
+            if ! cmp -s "trusted/$file" "trusted/$file.next"; then
+              mv "trusted/$file.next" "trusted/$file"
+              echo "$file" >> commit-files.txt
+            fi
+          done < prose-files.txt
+          jq --arg to "$TO" '.dependencies.queryhost = $to' trusted/package.json > trusted/next.json
+          mv trusted/next.json trusted/package.json
+          (cd trusted && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          printf '%s\n' package.json package-lock.json >> commit-files.txt
+
+          branch="queryhost/v$TO"
+          # A pull request in any state means a person has it, even if its branch is gone.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            # Retry a CI dispatch that failed after the pull request was opened.
+            if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ] \
+              && [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
+              gh workflow run ci.yml --ref "$branch"
+            fi
+            echo "$branch already has a pull request; leaving it alone."
+            exit 0
+          fi
+          # A branch without a pull request was left by a failed run, so start it over.
+          if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
+          fi
+          if [ -n "$(gh pr list --state open --search "\"queryhost to $TO\" in:title" --json number --jq '.[].number')" ]; then
+            echo "A pull request for queryhost $TO is already open."
+            exit 0
+          fi
+
+          # Rebuilding the files takes a while, so leave a default branch that moved meanwhile
+          # to the next run rather than opening a pull request on a stale base.
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" != "$BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved while the bump was rebuilt; the next run retries."
+            exit 0
+          fi
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$BASE" > /dev/null
+
+          # Commit through the API so GitHub signs it; the runner holds no signing key.
+          jq -n \
+            --arg query 'mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }' \
+            --arg repo "$GH_REPO" \
+            --arg branch "$branch" \
+            --arg head "$BASE" \
+            --arg headline "$COMMIT_TITLE $TO" \
+            '{query: $query, variables: {input: {
+              branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+              expectedHeadOid: $head,
+              message: {headline: $headline},
+              fileChanges: {additions: []}
+            }}}' > commit.json
+          while IFS= read -r file; do
+            base64 -w0 "trusted/$file" > contents.b64
+            jq --arg path "$file" --rawfile contents contents.b64 \
+              '.variables.input.fileChanges.additions += [{path: $path, contents: $contents}]' \
+              commit.json > next.json
+            mv next.json commit.json
+          done < commit-files.txt
+          gh api graphql --input commit.json > /dev/null
+
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "$COMMIT_TITLE $TO" \
+            --body-file body.md \
+            --assignee "$GITHUB_REPOSITORY_OWNER"
+
+          # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows,
+          # so run CI on the branch explicitly; its check attaches to the PR's head commit.
+          gh workflow run ci.yml --ref "$branch"

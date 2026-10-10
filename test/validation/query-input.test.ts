@@ -1,3 +1,4 @@
+import { listGames } from "queryhost";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -95,6 +96,16 @@ describe("hosted query input", () => {
       queryPort,
     });
   });
+
+  // Covers every game a new pinned release adds without a hand-written case per game.
+  it.each(listGames().filter((game) => game.defaultPort !== undefined))(
+    "resolves $id to its registry defaults",
+    ({ id, defaultPort, defaultQueryPort }) => {
+      expect(parseQueryInput(JSON.stringify({ game: id, host: "play.example.com" }))).toMatchObject(
+        { game: id, port: defaultPort, queryPort: defaultQueryPort ?? defaultPort },
+      );
+    },
+  );
 
   it("keys the cache by result-shaping fields but not the deadline", () => {
     const base = parseQueryInput('{"game":"rust","host":"play.example.com"}');
