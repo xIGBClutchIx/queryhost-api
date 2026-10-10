@@ -149,18 +149,18 @@ jobs:
           fi
 
           branch="queryhost/v$TO"
-          if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
-            # A pull request in any state means a person has it; a branch without one was
-            # left by a failed run, so start it over.
-            if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
-              # Retry a CI dispatch that failed after the pull request was opened.
-              if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ] \
-                && [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
-                gh workflow run ci.yml --ref "$branch"
-              fi
-              echo "$branch already has a pull request; leaving it alone."
-              exit 0
+          # A pull request in any state means a person has it, even if its branch is gone.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            # Retry a CI dispatch that failed after the pull request was opened.
+            if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ] \
+              && [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
+              gh workflow run ci.yml --ref "$branch"
             fi
+            echo "$branch already has a pull request; leaving it alone."
+            exit 0
+          fi
+          # A branch without a pull request was left by a failed run, so start it over.
+          if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
             gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
           fi
           if [ -n "$(gh pr list --state open --search "\"queryhost to $TO\" in:title" --json number --jq '.[].number')" ]; then
