@@ -9,6 +9,7 @@ import type {
   HealthResponse,
   HostedQueryResponse,
   QueryExecutor,
+  QueryStreamLine,
 } from "../../src/contracts.js";
 import { createApiServer, type ApiServer } from "../../src/http/server.js";
 import { ORIGIN_TOKEN_HEADER } from "../../src/http/origin-auth.js";
@@ -195,6 +196,74 @@ describe("portable HTTP API", () => {
     expect(executor).toHaveBeenCalledOnce();
   });
 
+  it("streams source progress as NDJSON when the caller asks for it", async () => {
+    const execution = deferred<QueryResult>();
+    const executor: QueryExecutor = (_input, onSource) => {
+      onSource({ type: "started", source: "a2s-info" });
+      onSource({ type: "completed", report: { source: "a2s-info", status: "ok", rttMs: 5 } });
+      return execution.promise;
+    };
+    const { baseUrl } = await start(executor);
+    const response = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: { ...authorizedHeaders(), accept: "application/x-ndjson" },
+      body: '{"game":"rust","host":"play.example.com"}',
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/x-ndjson; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+
+    // Progress reaches the caller while the query is still running.
+    const reader: ReadableStreamDefaultReader<Uint8Array> | undefined = response.body?.getReader();
+    const decoder = new TextDecoder();
+    const firstChunk = await reader?.read();
+    let text = decoder.decode(firstChunk?.value, { stream: true });
+    expect(text).toContain('"type":"started"');
+    execution.resolve(successfulResult());
+    for (let chunk = await reader?.read(); chunk?.done === false; chunk = await reader?.read()) {
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+
+    expect(text.endsWith("\n")).toBe(true);
+    const lines = text
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as QueryStreamLine);
+    expect(lines).toEqual([
+      { type: "started", source: "a2s-info" },
+      { type: "completed", report: { source: "a2s-info", status: "ok", rttMs: 5 } },
+      {
+        type: "result",
+        result: { ...successfulResult(), cache: { status: "miss", ageMs: 0, ttlMs: 10_000 } },
+      },
+    ]);
+
+    const cached = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers: { ...authorizedHeaders(), accept: "application/json, application/x-ndjson" },
+      body: '{"game":"rust","host":"play.example.com"}',
+    });
+    const cachedLines = (await cached.text()).trimEnd().split("\n");
+    expect(cachedLines).toHaveLength(1);
+    expect(JSON.parse(cachedLines[0] ?? "")).toMatchObject({
+      type: "result",
+      result: { cache: { status: "hit" } },
+    });
+  });
+
+  it("answers JSON unless NDJSON is accepted", async () => {
+    const { baseUrl } = await start(() => Promise.resolve(successfulResult()));
+    for (const accept of ["application/json", "application/x-ndjson;q=0", "*/*"]) {
+      const response = await fetch(`${baseUrl}/query`, {
+        method: "POST",
+        headers: { ...authorizedHeaders(), accept },
+        body: '{"game":"rust","host":"play.example.com"}',
+      });
+      expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
+      await response.text();
+    }
+  });
+
   it("reports host-free usage counters to trusted callers only", async () => {
     const { baseUrl } = await start(() => Promise.resolve(successfulResult()));
     const headers = authorizedHeaders();
@@ -286,6 +355,48 @@ describe("portable HTTP API", () => {
     expect(rejected.status).toBe(429);
     expect(rejected.headers.get("retry-after")).toBe("1");
     expect(executor).toHaveBeenCalledOnce();
+
+    execution.resolve(successfulResult());
+    expect((await first).status).toBe(200);
+  });
+
+  it("refuses a streamed query at capacity with an ordinary JSON 429", async () => {
+    const execution = deferred<QueryResult>();
+    const executor = vi.fn(() => execution.promise);
+    const { baseUrl } = await start(
+      executor,
+      testConfig({
+        capacity: {
+          maxActive: 1,
+          maxQueued: 0,
+          maxPerDestination: 1,
+          destinationCooldownMs: 0,
+          startRate: testStartRate(),
+        },
+      }),
+    );
+    const headers = { ...authorizedHeaders(), accept: "application/x-ndjson" };
+    const first = fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers,
+      body: '{"game":"rust","host":"one.example.com"}',
+    });
+    while (executor.mock.calls.length === 0) {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+    }
+
+    const rejected = await fetch(`${baseUrl}/query`, {
+      method: "POST",
+      headers,
+      body: '{"game":"rust","host":"two.example.com"}',
+    });
+    expect(rejected.status).toBe(429);
+    expect(rejected.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    await expect(parsed<ApiErrorResponse>(rejected)).resolves.toMatchObject({
+      error: { code: "OVERLOADED" },
+    });
 
     execution.resolve(successfulResult());
     expect((await first).status).toBe(200);

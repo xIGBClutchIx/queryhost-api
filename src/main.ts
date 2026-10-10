@@ -8,7 +8,7 @@ import { JsonLogger } from "./logging.js";
 const SHUTDOWN_GRACE_MS = 10_000;
 const config = loadConfig();
 const logger = new JsonLogger();
-const executor: QueryExecutor = (input) => query(input);
+const executor: QueryExecutor = (input, onSource) => query({ ...input, onSource });
 const api = createApiServer(config, executor, logger);
 
 api.server.listen(config.port, config.host, () => {

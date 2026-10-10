@@ -1,4 +1,4 @@
-import type { QueryResult } from "queryhost";
+import type { QueryResult, QuerySourceEvent } from "queryhost";
 import { describe, expect, it, vi } from "vitest";
 
 import type { HostedQueryInput, QueryExecutor } from "../../src/contracts.js";
@@ -37,6 +37,75 @@ describe("query service", () => {
     });
     expect(executor).toHaveBeenCalledOnce();
     expect(service.snapshot().capacity.rate.startsInWindow).toBe(1);
+  });
+
+  it("fans live progress out to every caller sharing the run", async () => {
+    const execution = deferred<QueryResult>();
+    let report: ((event: QuerySourceEvent) => void) | undefined;
+    const executor: QueryExecutor = (_input, onSource) => {
+      report = onSource;
+      return execution.promise;
+    };
+    const service = new QueryService(testConfig(), executor);
+    const firstEvents: QuerySourceEvent[] = [];
+    const lateEvents: QuerySourceEvent[] = [];
+
+    const first = service.execute(rustInput(), (event) => {
+      firstEvents.push(event);
+    });
+    report?.({ type: "started", source: "a2s-info" });
+    // A caller joining mid-run first receives what it missed.
+    const late = service.execute(rustInput(), (event) => {
+      lateEvents.push(event);
+    });
+    const silent = service.execute(rustInput());
+    report?.({ type: "completed", report: { source: "a2s-info", status: "ok", rttMs: 5 } });
+    execution.resolve(successfulResult());
+
+    await expect(first).resolves.toMatchObject({ cache: { status: "miss" } });
+    await expect(late).resolves.toMatchObject({ cache: { status: "coalesced" } });
+    await expect(silent).resolves.toMatchObject({ cache: { status: "coalesced" } });
+    const expected: QuerySourceEvent[] = [
+      { type: "started", source: "a2s-info" },
+      { type: "completed", report: { source: "a2s-info", status: "ok", rttMs: 5 } },
+    ];
+    expect(firstEvents).toEqual(expected);
+    expect(lateEvents).toEqual(expected);
+
+    // Nothing reaches a finished caller, and cached answers report no progress.
+    report?.({ type: "started", source: "a2s-player" });
+    expect(firstEvents).toHaveLength(2);
+    const cachedEvents: QuerySourceEvent[] = [];
+    await expect(
+      service.execute(rustInput(), (event) => {
+        cachedEvents.push(event);
+      }),
+    ).resolves.toMatchObject({ cache: { status: "hit" } });
+    expect(cachedEvents).toEqual([]);
+  });
+
+  it("keeps a throwing progress listener away from the query and other callers", async () => {
+    const execution = deferred<QueryResult>();
+    let report: ((event: QuerySourceEvent) => void) | undefined;
+    const executor: QueryExecutor = (_input, onSource) => {
+      report = onSource;
+      return execution.promise;
+    };
+    const service = new QueryService(testConfig(), executor);
+    const received: QuerySourceEvent[] = [];
+    const failing = service.execute(rustInput(), () => {
+      throw new Error("listener failure");
+    });
+    const healthy = service.execute(rustInput(), (event) => {
+      received.push(event);
+    });
+
+    report?.({ type: "started", source: "a2s-info" });
+    execution.resolve(successfulResult());
+
+    await expect(failing).resolves.toMatchObject({ ok: true, cache: { status: "miss" } });
+    await expect(healthy).resolves.toMatchObject({ ok: true });
+    expect(received).toEqual([{ type: "started", source: "a2s-info" }]);
   });
 
   it("does not let one waiter cancel shared live work", async () => {
