@@ -109,4 +109,18 @@ describe("start rate gate", () => {
     expect(gate.snapshot()).toMatchObject({ startsInWindow: 3, trackedDestinations: 1 });
     expect(gate.admit("host:*", 5)).toMatchObject({ admitted: true });
   });
+
+  it("refunds a multi-start admission whole or not at all", () => {
+    const gate = new StartRateGate(testStartRate({ windowMs: 10_000, maxStarts: 6 }), () => 1_000);
+    const single = gate.admit("one");
+    if (single.admitted) {
+      gate.refund("one", single.startedAt);
+    }
+    const detection = gate.admit("host:*", 6);
+    expect(detection).toMatchObject({ admitted: true });
+    if (detection.admitted) {
+      gate.refund("host:*", detection.startedAt, 6);
+    }
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 6, trackedDestinations: 1 });
+  });
 });

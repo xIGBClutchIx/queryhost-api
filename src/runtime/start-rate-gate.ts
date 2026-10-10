@@ -86,31 +86,29 @@ export class StartRateGate {
    * cleared admissions are ignored.
    */
   public refund(destination: string, startedAt: number, cost = 1): void {
-    for (let start = 0; start < cost; start += 1) {
-      if (!this.#refundOne(destination, startedAt)) {
-        return;
-      }
-    }
-  }
-
-  #refundOne(destination: string, startedAt: number): boolean {
     const now = this.#now();
     this.#prune(this.#refunds, now);
-    if (this.#refunds.length >= this.#policy.maxStarts) {
-      return false;
+    this.#prune(this.#globalStarts, now);
+    // A multi-start admission is refunded whole or not at all, so a blocked detection never
+    // leaves part of its charge behind.
+    if (this.#refunds.length + cost > this.#policy.maxStarts) {
+      return;
     }
-    if (!this.#remove(this.#globalStarts, startedAt)) {
-      return false;
+    const charged = this.#globalStarts.filter((start) => start === startedAt).length;
+    if (charged < cost) {
+      return;
     }
-    this.#refunds.push(now);
     const destinationStarts = this.#startsByDestination.get(destination);
-    if (destinationStarts !== undefined) {
-      this.#remove(destinationStarts, startedAt);
-      if (destinationStarts.length === 0) {
-        this.#startsByDestination.delete(destination);
+    for (let start = 0; start < cost; start += 1) {
+      this.#remove(this.#globalStarts, startedAt);
+      this.#refunds.push(now);
+      if (destinationStarts !== undefined) {
+        this.#remove(destinationStarts, startedAt);
       }
     }
-    return true;
+    if (destinationStarts?.length === 0) {
+      this.#startsByDestination.delete(destination);
+    }
   }
 
   public snapshot(): StartRateSnapshot {
