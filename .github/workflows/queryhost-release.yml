@@ -77,16 +77,12 @@ jobs:
           echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           node scripts/bump-queryhost.mjs $VERSION --body "$RUNNER_TEMP/body.md"
 
-      - name: Bundle the changed files
+      - name: Bundle the changed file names and PR body
         if: steps.bump.outputs.changed == 'true'
         run: |
-          mkdir -p "$RUNNER_TEMP/bump/files"
+          mkdir -p "$RUNNER_TEMP/bump"
           cp "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/bump/body.md"
           git diff --name-only > "$RUNNER_TEMP/bump/changed.txt"
-          while IFS= read -r file; do
-            mkdir -p "$RUNNER_TEMP/bump/files/$(dirname "$file")"
-            cp "$file" "$RUNNER_TEMP/bump/files/$file"
-          done < "$RUNNER_TEMP/bump/changed.txt"
 
       - name: Upload the bump
         if: steps.bump.outputs.changed == 'true'
@@ -143,26 +139,39 @@ jobs:
             exit 1
           fi
 
-          # The bundle comes from a job that ran the new release's code, so only its Markdown
-          # crosses over. The manifest and lockfile are rebuilt here from the base commit,
-          # resolving metadata only, so no package code runs with this job's token.
+          # The bundle comes from a job that ran the new release's code, so only its file names
+          # and PR body cross over. Every committed file is rebuilt here from the base commit,
+          # and dependencies are resolved from metadata only, so no package code runs here.
           allowed='^([A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
-          grep -vxE 'package\.json|package-lock\.json' changed.txt > commit-files.txt || true
+          grep -vxE 'package\.json|package-lock\.json' changed.txt > prose-files.txt || true
+          mkdir trusted trusted/docs
+          raw() {
+            gh api -H "Accept: application/vnd.github.raw+json" "repos/$GH_REPO/contents/$1?ref=$BASE"
+          }
+          raw package.json > trusted/package.json
+          raw package-lock.json > trusted/package-lock.json
+          FROM="$(jq -r .dependencies.queryhost trusted/package.json)"
+          : > commit-files.txt
           while IFS= read -r file; do
             if ! [[ "$file" =~ $allowed ]]; then
               echo "::error::Unexpected file in the bump: $file"
               exit 1
             fi
-          done < commit-files.txt
-          mkdir trusted
-          for file in package.json package-lock.json; do
-            gh api -H "Accept: application/vnd.github.raw+json" \
-              "repos/$GH_REPO/contents/$file?ref=$BASE" > "trusted/$file"
-          done
+            # Only phrases that name the old pin change, as in scripts/bump-queryhost.mjs.
+            raw "$file" \
+              | jq -Rjs --arg from "$FROM" --arg to "$TO" \
+                'split("queryhost@" + $from) | join("queryhost@" + $to)
+                | split("`queryhost` " + $from) | join("`queryhost` " + $to)' \
+              > "trusted/$file.next"
+            raw "$file" > "trusted/$file"
+            if ! cmp -s "trusted/$file" "trusted/$file.next"; then
+              mv "trusted/$file.next" "trusted/$file"
+              echo "$file" >> commit-files.txt
+            fi
+          done < prose-files.txt
           jq --arg to "$TO" '.dependencies.queryhost = $to' trusted/package.json > trusted/next.json
           mv trusted/next.json trusted/package.json
           (cd trusted && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
-          cp trusted/package.json trusted/package-lock.json files/
           printf '%s\n' package.json package-lock.json >> commit-files.txt
 
           branch="queryhost/v$TO"
@@ -201,7 +210,7 @@ jobs:
               fileChanges: {additions: []}
             }}}' > commit.json
           while IFS= read -r file; do
-            base64 -w0 "files/$file" > contents.b64
+            base64 -w0 "trusted/$file" > contents.b64
             jq --arg path "$file" --rawfile contents contents.b64 \
               '.variables.input.fileChanges.additions += [{path: $path, contents: $contents}]' \
               commit.json > next.json
