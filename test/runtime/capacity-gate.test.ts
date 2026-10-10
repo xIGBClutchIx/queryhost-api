@@ -207,6 +207,12 @@ describe("capacity gate", () => {
     await queued;
     expect(queuedTask).not.toHaveBeenCalled();
     expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 2 });
+
+    // The refused entry never started, so it left no cooldown behind for its destination.
+    await vi.advanceTimersByTimeAsync(500);
+    const next = gate.run("one", ok);
+    expect(gate.snapshot()).toMatchObject({ active: 1, queued: 0 });
+    await expect(next).resolves.toMatchObject({ ok: true });
   });
 
   it("keeps a queued charge in the window from the moment its work starts", async () => {

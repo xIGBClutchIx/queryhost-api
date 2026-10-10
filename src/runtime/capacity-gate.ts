@@ -8,6 +8,11 @@ type Clock = () => number;
 interface QueueEntry {
   readonly destination: string;
   /** Starts the admitted work and settles its caller's promise; never rejects. */
+  /**
+   * Renews the entry's start-rate charge just before it starts. A refused renewal settles the
+   * caller's promise and returns false, and the entry is dropped without starting.
+   */
+  readonly renew: () => boolean;
   readonly start: () => Promise<void>;
   readonly reject: (error: Error) => void;
 }
@@ -106,8 +111,8 @@ export class CapacityGate {
     }
 
     return new Promise<T>((resolve, reject) => {
-      const start = (): Promise<void> => {
-        // Queued work may wait past its window, so its charge is renewed as it starts.
+      // Queued work may wait past its window, so its charge is renewed as it starts.
+      const renew = (): boolean => {
         const renewed = this.#startRate.renew(destination, startedAt, charge.cost);
         if (!renewed.admitted) {
           reject(
@@ -116,12 +121,13 @@ export class CapacityGate {
               renewed.retryAfterSeconds,
             ),
           );
-          return Promise.resolve();
+          return false;
         }
         startedAt = renewed.startedAt;
-        return admittedTask().then(resolve, reject);
+        return true;
       };
-      this.#queue.push({ destination, start, reject });
+      const start = (): Promise<void> => admittedTask().then(resolve, reject);
+      this.#queue.push({ destination, renew, start, reject });
       this.#drain();
     });
   }
@@ -208,7 +214,9 @@ export class CapacityGate {
       const cooldown = this.#cooldownRemaining(entry.destination);
       if (destinationActive < this.#config.maxPerDestination && cooldown === 0) {
         this.#queue.splice(index, 1);
-        void this.#start(entry.destination, entry.start);
+        if (entry.renew()) {
+          void this.#start(entry.destination, entry.start);
+        }
         continue;
       }
 
