@@ -15,6 +15,7 @@ import {
   queryDestinationKey,
 } from "../validation/query-input.js";
 import { CapacityGate, type CapacitySnapshot } from "./capacity-gate.js";
+import { QueryProgress, type ProgressListener } from "./query-progress.js";
 import { ResultCache, resultTtlMs, type CacheSnapshot } from "./result-cache.js";
 import { UsageStats } from "./usage-stats.js";
 
@@ -22,6 +23,7 @@ type Clock = () => number;
 
 interface InFlightQuery {
   readonly result: Promise<QueryResult>;
+  readonly progress: QueryProgress;
   readonly timeoutMs: number;
   readonly deadline: number;
 }
@@ -86,7 +88,15 @@ export class QueryService {
     this.#now = now;
   }
 
-  public async execute(input: HostedQueryInput): Promise<HostedQueryResponse> {
+  /**
+   * Answers one query from the cache, shared live work, or a new live run. `onSource` receives
+   * the live run's source progress, including events it missed when joining shared work; a
+   * cached answer reports none.
+   */
+  public async execute(
+    input: HostedQueryInput,
+    onSource?: ProgressListener,
+  ): Promise<HostedQueryResponse> {
     const key = queryCacheKey(input);
     const cached = this.#cache.get(key, input.timeoutMs);
     if (cached !== undefined) {
@@ -106,7 +116,13 @@ export class QueryService {
       (run) => run.timeoutMs >= input.timeoutMs && run.deadline <= startedAt + input.timeoutMs,
     );
     if (shared !== undefined) {
-      const result = await shared.result;
+      const unsubscribe = onSource === undefined ? undefined : shared.progress.subscribe(onSource);
+      let result: QueryResult;
+      try {
+        result = await shared.result;
+      } finally {
+        unsubscribe?.();
+      }
       this.#usage.recordQuery(input.game, "coalesced");
       return hostedResponse(result, {
         status: "coalesced",
@@ -115,9 +131,15 @@ export class QueryService {
       });
     }
 
-    const execution = this.#gate.run(queryDestinationKey(input), () => this.#run(input, key));
+    const progress = new QueryProgress();
+    // Subscribe before admission: a started task may report progress synchronously.
+    const unsubscribe = onSource === undefined ? undefined : progress.subscribe(onSource);
+    const execution = this.#gate.run(queryDestinationKey(input), () =>
+      this.#run(input, key, progress),
+    );
     const live: InFlightQuery = {
       result: execution,
+      progress,
       timeoutMs: input.timeoutMs,
       deadline: startedAt + input.timeoutMs,
     };
@@ -132,6 +154,7 @@ export class QueryService {
         ttlMs: resultTtlMs(result, this.#policy),
       });
     } finally {
+      unsubscribe?.();
       const remaining = (this.#inFlight.get(key) ?? []).filter((run) => run !== live);
       if (remaining.length === 0) {
         this.#inFlight.delete(key);
@@ -171,11 +194,13 @@ export class QueryService {
     this.#gate.close();
   }
 
-  async #run(input: HostedQueryInput, key: string): Promise<QueryResult> {
+  async #run(input: HostedQueryInput, key: string, progress: QueryProgress): Promise<QueryResult> {
     const startedAt = this.#now();
     let result: QueryResult;
     try {
-      result = await this.#executor(input);
+      result = await this.#executor(input, (event) => {
+        progress.publish(event);
+      });
     } catch {
       result = internalFailure(input.game);
     }

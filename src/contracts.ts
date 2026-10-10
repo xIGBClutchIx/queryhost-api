@@ -6,6 +6,7 @@ import type {
   QueryInput,
   QueryMode,
   QueryResult,
+  QuerySourceEvent,
 } from "queryhost";
 
 /** Fully normalized query accepted by the hosted runtime. */
@@ -18,7 +19,11 @@ export interface HostedQueryInput extends QueryInput<GameId> {
   readonly timeoutMs: number;
 }
 
-export type QueryExecutor = (input: HostedQueryInput) => Promise<QueryResult>;
+/** Runs one live query, reporting each source's progress through `onSource`. */
+export type QueryExecutor = (
+  input: HostedQueryInput,
+  onSource: (event: QuerySourceEvent) => void,
+) => Promise<QueryResult>;
 
 /** Normalized detection accepted by the hosted runtime; the probe budget comes from config. */
 export interface HostedDetectInput extends DetectInput {
@@ -45,6 +50,13 @@ export interface CacheMetadata {
 export type HostedQueryResponse = QueryResult & {
   readonly cache: CacheMetadata;
 };
+
+/**
+ * One line of a streamed `POST /query` response: source progress as the library reports it,
+ * then exactly one final `result` line carrying the same body as the JSON response.
+ */
+export type QueryStreamLine =
+  QuerySourceEvent | { readonly type: "result"; readonly result: HostedQueryResponse };
 
 export interface GamesResponse {
   readonly games: readonly GameDefinition[];

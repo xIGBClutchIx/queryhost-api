@@ -13,6 +13,7 @@ import type {
   HostedDetectResponse,
   HostedQueryResponse,
   QueryExecutor,
+  QueryStreamLine,
 } from "../contracts.js";
 import type { Logger } from "../logging.js";
 import { CapacityRejectedError } from "../runtime/capacity-gate.js";
@@ -66,6 +67,64 @@ function sendJson(
     ...extraHeaders,
   });
   response.end(body);
+}
+
+const NDJSON = "application/x-ndjson";
+
+/** True when `Accept` lists NDJSON without refusing it through `q=0`. */
+function acceptsNdjson(request: IncomingMessage): boolean {
+  const accept = request.headers.accept;
+  if (accept === undefined) {
+    return false;
+  }
+  return accept.split(",").some((range) => {
+    const [type = "", ...parameters] = range.split(";");
+    return (
+      type.trim().toLowerCase() === NDJSON &&
+      !parameters.some((parameter) => /^\s*q\s*=\s*0(?:\.0{0,3})?\s*$/iu.test(parameter))
+    );
+  });
+}
+
+/**
+ * Writes newline-delimited JSON. Headers go out with the first line, so a query refused before
+ * it starts can still answer with an ordinary JSON error status.
+ */
+class NdjsonWriter {
+  readonly #response: ServerResponse;
+  readonly #requestId: string;
+
+  public constructor(response: ServerResponse, requestId: string) {
+    this.#response = response;
+    this.#requestId = requestId;
+  }
+
+  public get started(): boolean {
+    return this.#response.headersSent;
+  }
+
+  public write(line: QueryStreamLine): void {
+    // A caller that disconnected stops receiving lines; the shared query still completes.
+    if (this.#response.destroyed || this.#response.writableEnded) {
+      return;
+    }
+    if (!this.#response.headersSent) {
+      this.#response.writeHead(200, {
+        "cache-control": "private, no-store",
+        "content-type": `${NDJSON}; charset=utf-8`,
+        "x-content-type-options": "nosniff",
+        "x-queryhost-request-id": this.#requestId,
+      });
+    }
+    this.#response.write(`${JSON.stringify(line)}\n`);
+  }
+
+  public end(result: HostedQueryResponse): void {
+    this.write({ type: "result", result });
+    if (!this.#response.writableEnded) {
+      this.#response.end();
+    }
+  }
 }
 
 function mediaType(request: IncomingMessage): string {
@@ -185,7 +244,15 @@ async function queryRoute(
     return input;
   }
 
+  const stream = acceptsNdjson(request) ? new NdjsonWriter(response, requestId) : undefined;
   try {
+    if (stream !== undefined) {
+      const result = await queries.execute(input, (event) => {
+        stream.write(event);
+      });
+      stream.end(result);
+      return { status: 200, cache: result.cache.status, game: input.game };
+    }
     const result = await queries.execute(input);
     sendJson(response, 200, result, requestId, {
       "x-queryhost-cache": result.cache.status,
@@ -193,7 +260,8 @@ async function queryRoute(
     });
     return { status: 200, cache: result.cache.status, game: input.game };
   } catch (error) {
-    if (error instanceof CapacityRejectedError) {
+    // Admission is decided before a query reports progress, so a refusal always precedes the stream.
+    if (error instanceof CapacityRejectedError && stream?.started !== true) {
       overloaded(response, requestId, error);
       return { status: 429, game: input.game };
     }

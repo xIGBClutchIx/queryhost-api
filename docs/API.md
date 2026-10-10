@@ -1,6 +1,6 @@
 # HTTP API
 
-The API is JSON-only and has no `/v1` prefix. Except for `GET /health`, requests require the `x-queryhost-origin-token` header. The token is supplied by a trusted internal caller and is never returned or logged.
+The API speaks JSON, plus an opt-in NDJSON stream for `POST /query` progress, and has no `/v1` prefix. Except for `GET /health`, requests require the `x-queryhost-origin-token` header. The token is supplied by a trusted internal caller and is never returned or logged.
 
 ## `POST /query`
 
@@ -28,6 +28,20 @@ Cache statuses are:
 `timeoutMs` is not part of the cache key. A cached success serves any deadline; a cached timeout or offline failure serves only requests whose `timeoutMs` is no greater than the one that produced it. A request shares in-flight work only when that run has at least the request's `timeoutMs` and should finish before the request's own deadline.
 
 When the live-work queue is full, the API returns HTTP `429` with `Retry-After: 1` before invoking the library.
+
+### Streaming progress
+
+Send `Accept: application/x-ndjson` to receive the query's per-source progress as it runs. A `200` stream has `Content-Type: application/x-ndjson; charset=utf-8` and one JSON object per line:
+
+```ndjson
+{"type":"started","source":"a2s-info"}
+{"type":"completed","report":{"source":"a2s-info","status":"ok","rttMs":31}}
+{"type":"result","result":{"ok":true,"game":"rust","cache":{"status":"miss","ageMs":0,"ttlMs":10000}}}
+```
+
+`started` and `completed` lines are the library's `QuerySourceEvent` values. Exactly one `result` line ends the stream with the same body the JSON response carries; result bodies are abbreviated above. Cache metadata appears only in that line, not in `x-queryhost-cache` or `Age`. A coalesced request first receives the shared run's earlier events, and a cache hit streams only the `result` line.
+
+Validation, authentication, and capacity failures happen before any line is written and keep their ordinary JSON error responses and statuses. Without that `Accept` value, or with `q=0`, the response is the JSON described above.
 
 ## `POST /detect`
 

@@ -69,6 +69,8 @@ npm run verify
 }
 ```
 
+Callers that send `Accept: application/x-ndjson` instead receive each source's progress as a line while the query runs, ending with a `result` line that carries this body.
+
 See [docs/API.md](docs/API.md) for the HTTP contract and [docs/Operations.md](docs/Operations.md) for Railway and cost controls.
 
 ## Deployment status
