@@ -194,6 +194,12 @@ jobs:
             exit 0
           fi
 
+          # Rebuilding the files takes a while, so leave a default branch that moved meanwhile
+          # to the next run rather than opening a pull request on a stale base.
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" != "$BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved while the bump was rebuilt; the next run retries."
+            exit 0
+          fi
           gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$BASE" > /dev/null
 
           # Commit through the API so GitHub signs it; the runner holds no signing key.
