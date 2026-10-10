@@ -132,10 +132,11 @@ jobs:
             fi
           done < changed.txt
           gh api "repos/$GH_REPO/contents/package.json?ref=$BASE" --jq .content | base64 -d > base-package.json
-          if ! jq -e --slurpfile base base-package.json \
-            'del(.dependencies.queryhost) == ($base[0] | del(.dependencies.queryhost))' \
-            files/package.json > /dev/null; then
-            echo "::error::package.json changed beyond the queryhost pin."
+          if ! [[ "$TO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || ! jq -e --slurpfile base base-package.json --arg to "$TO" \
+              '.dependencies.queryhost == $to and del(.dependencies.queryhost) == ($base[0] | del(.dependencies.queryhost))' \
+              files/package.json > /dev/null; then
+            echo "::error::package.json must change only the queryhost pin, to $TO."
             exit 1
           fi
 
