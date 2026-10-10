@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   QueryInputError,
+  detectDestinationKey,
+  parseDetectInput,
   parseQueryInput,
   queryCacheKey,
   queryDestinationKey,
@@ -132,5 +134,33 @@ describe("hosted query input", () => {
     expect(() => parseQueryInput('{"game":"rust","host":"play.example.com","port":0}')).toThrow(
       "port",
     );
+  });
+
+  it("parses detections with the server's probe budget and no game", () => {
+    const input = parseDetectInput('{"host":"Play.Example.com.","port":2456}', 4);
+    expect(input).toEqual({
+      host: "play.example.com",
+      port: 2_456,
+      mode: "full",
+      timeoutMs: 5_000,
+      maxProbes: 4,
+    });
+    expect(detectDestinationKey(input)).toBe("play.example.com:*");
+    expect(parseDetectInput('{"host":"play.example.com","mode":"summary"}', 2)).toEqual({
+      host: "play.example.com",
+      mode: "summary",
+      timeoutMs: 5_000,
+      maxProbes: 2,
+    });
+    for (const body of [
+      '{"host":"play.example.com","game":"rust"}',
+      '{"host":"play.example.com","maxProbes":16}',
+      '{"host":"play.example.com","queryPort":27015}',
+      '{"host":"play.example.com","timeoutMs":5001}',
+      '{"host":"https://play.example.com"}',
+      "{}",
+    ]) {
+      expect(() => parseDetectInput(body, 4)).toThrow(QueryInputError);
+    }
   });
 });

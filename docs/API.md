@@ -29,6 +29,21 @@ Cache statuses are:
 
 When the live-work queue is full, the API returns HTTP `429` with `Retry-After: 1` before invoking the library.
 
+## `POST /detect`
+
+Identifies which supported game a server runs with the library's `detect()`, then returns that game's query. Request fields:
+
+| Field       | Type                | Required | Hosted policy                                  |
+| ----------- | ------------------- | -------- | ---------------------------------------------- |
+| `host`      | string              | yes      | Plain hostname or IP literal, never URL syntax |
+| `port`      | integer             | no       | 1 through 65,535; game or query port           |
+| `mode`      | `summary` or `full` | no       | Defaults to `full`                             |
+| `timeoutMs` | integer             | no       | 1 through 5,000; defaults to 5,000             |
+
+Callers cannot choose the probe budget: each detection probes at most `QUERYHOST_DETECT_MAX_PROBES` protocol and port pairs (default 4). An accepted detection returns HTTP `200` with the library's `DetectResult`, whether or not a game was identified. Detections are not cached or shared between requests and carry no `cache` field.
+
+A detection is charged against the admission windows as one start per probe plus one for the detected game's query, so the default costs five of a destination's six starts. Its destination is the host alone, apart from query destinations. When either window cannot fit that cost, the API returns `429` with `Retry-After` before probing. A detection the library rejects with `TARGET_BLOCKED` returns its whole charge.
+
 ## `GET /games`
 
 Returns `{ "games": [...] }` from the library's exported registry. The API does not maintain another game list.
@@ -80,11 +95,16 @@ Returns aggregate usage counters since process start for trusted callers:
       { "le": 5000, "count": 1 },
       { "le": null, "count": 0 }
     ]
+  },
+  "detections": {
+    "games": { "valheim": 2 },
+    "failed": 1,
+    "errors": { "NOT_DETECTED": 1 }
   }
 }
 ```
 
-`live` counts executor runs (misses), with latency measured around the library call. Counters are keyed only by HTTP status, registry game ID, cache status, and library error code; they never contain targets, callers, or results, and reset when the process restarts.
+`detections` counts admitted `POST /detect` runs by detected game ID, or by detection error code when none was identified. `live` counts executor runs (misses), with latency measured around the library call. Counters are keyed only by HTTP status, registry game ID, cache status, and library or detection error code; they never contain targets, callers, or results, and reset when the process restarts.
 
 ## HTTP errors
 

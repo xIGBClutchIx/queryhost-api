@@ -31,11 +31,19 @@ export class StartRateGate {
     this.#now = now;
   }
 
-  public admit(destination: string): StartRateDecision {
+  /**
+   * Admits work that costs `cost` starts against both windows at once. Detection, which probes
+   * several protocols for one target, pays one start per probe it may send.
+   */
+  public admit(destination: string, cost = 1): StartRateDecision {
     const now = this.#now();
     this.#prune(this.#globalStarts, now);
-    if (this.#globalStarts.length >= this.#policy.maxStarts) {
-      return { admitted: false, retryAfterSeconds: this.#retryAfter(this.#globalStarts, now) };
+    const globalExcess = this.#globalStarts.length + cost - this.#policy.maxStarts;
+    if (globalExcess > 0) {
+      return {
+        admitted: false,
+        retryAfterSeconds: this.#retryAfter(this.#globalStarts, now, globalExcess),
+      };
     }
 
     let destinationStarts = this.#startsByDestination.get(destination);
@@ -48,8 +56,12 @@ export class StartRateGate {
     }
 
     if (destinationStarts !== undefined) {
-      if (destinationStarts.length >= this.#policy.maxStartsPerDestination) {
-        return { admitted: false, retryAfterSeconds: this.#retryAfter(destinationStarts, now) };
+      const excess = destinationStarts.length + cost - this.#policy.maxStartsPerDestination;
+      if (excess > 0) {
+        return {
+          admitted: false,
+          retryAfterSeconds: this.#retryAfter(destinationStarts, now, excess),
+        };
       }
     } else {
       this.#pruneDestinations(now);
@@ -60,8 +72,10 @@ export class StartRateGate {
       this.#startsByDestination.set(destination, destinationStarts);
     }
 
-    this.#globalStarts.push(now);
-    destinationStarts.push(now);
+    for (let start = 0; start < cost; start += 1) {
+      this.#globalStarts.push(now);
+      destinationStarts.push(now);
+    }
     return { admitted: true, startedAt: now };
   }
 
@@ -71,24 +85,32 @@ export class StartRateGate {
    * `maxStarts`, so executor calls stay bounded; beyond it the admission stays spent. Expired or
    * cleared admissions are ignored.
    */
-  public refund(destination: string, startedAt: number): void {
+  public refund(destination: string, startedAt: number, cost = 1): void {
+    for (let start = 0; start < cost; start += 1) {
+      if (!this.#refundOne(destination, startedAt)) {
+        return;
+      }
+    }
+  }
+
+  #refundOne(destination: string, startedAt: number): boolean {
     const now = this.#now();
     this.#prune(this.#refunds, now);
     if (this.#refunds.length >= this.#policy.maxStarts) {
-      return;
+      return false;
     }
     if (!this.#remove(this.#globalStarts, startedAt)) {
-      return;
+      return false;
     }
     this.#refunds.push(now);
     const destinationStarts = this.#startsByDestination.get(destination);
-    if (destinationStarts === undefined) {
-      return;
+    if (destinationStarts !== undefined) {
+      this.#remove(destinationStarts, startedAt);
+      if (destinationStarts.length === 0) {
+        this.#startsByDestination.delete(destination);
+      }
     }
-    this.#remove(destinationStarts, startedAt);
-    if (destinationStarts.length === 0) {
-      this.#startsByDestination.delete(destination);
-    }
+    return true;
   }
 
   public snapshot(): StartRateSnapshot {
@@ -142,8 +164,9 @@ export class StartRateGate {
     }
   }
 
-  #retryAfter(starts: readonly number[], now: number): number {
-    const oldest = starts[0];
+  /** Seconds until `needed` of the oldest starts have left the window. */
+  #retryAfter(starts: readonly number[], now: number, needed = 1): number {
+    const oldest = starts[Math.min(needed, starts.length) - 1];
     if (oldest === undefined) {
       return 1;
     }

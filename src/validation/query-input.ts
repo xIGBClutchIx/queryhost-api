@@ -7,9 +7,9 @@ import {
   type QueryMode,
 } from "queryhost";
 
-import type { HostedQueryInput } from "../contracts.js";
+import type { HostedDetectInput, HostedQueryInput } from "../contracts.js";
 
-const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
+const QUERY_FIELDS: ReadonlySet<string> = new Set([
   "game",
   "host",
   "port",
@@ -17,6 +17,7 @@ const ALLOWED_FIELDS: ReadonlySet<string> = new Set([
   "mode",
   "timeoutMs",
 ]);
+const DETECT_FIELDS: ReadonlySet<string> = new Set(["host", "port", "mode", "timeoutMs"]);
 const MAX_HOST_LENGTH = 253;
 const MAX_HOSTED_TIMEOUT_MS = 5_000;
 const CACHE_SCHEMA = 2;
@@ -49,8 +50,8 @@ function jsonObject(value: JsonValue): JsonObject {
   return value;
 }
 
-function rejectExtraFields(value: JsonObject): void {
-  const extra = Object.keys(value).find((key) => !ALLOWED_FIELDS.has(key));
+function rejectExtraFields(value: JsonObject, allowed: ReadonlySet<string>): void {
+  const extra = Object.keys(value).find((key) => !allowed.has(key));
   if (extra !== undefined) {
     throw new QueryInputError(`Unsupported request field: ${extra}.`);
   }
@@ -139,7 +140,7 @@ function effectiveQueryPort(
 /** Parses, validates, and canonicalizes one hosted query request. */
 export function parseQueryInput(text: string): HostedQueryInput {
   const body = jsonObject(parseJson(text));
-  rejectExtraFields(body);
+  rejectExtraFields(body, QUERY_FIELDS);
 
   const game = canonicalGameId(gameId(body["game"]));
   const definition = getGameDefinition(game);
@@ -166,6 +167,34 @@ export function parseQueryInput(text: string): HostedQueryInput {
       optionalInteger(body["timeoutMs"], "timeoutMs", 1, MAX_HOSTED_TIMEOUT_MS) ??
       MAX_HOSTED_TIMEOUT_MS,
   };
+}
+
+/**
+ * Parses and validates one hosted detection request. The caller cannot raise the probe budget;
+ * `maxProbes` comes from the server configuration.
+ */
+export function parseDetectInput(text: string, maxProbes: number): HostedDetectInput {
+  const body = jsonObject(parseJson(text));
+  rejectExtraFields(body, DETECT_FIELDS);
+  const port = optionalInteger(body["port"], "port", 1, 65_535);
+
+  return {
+    host: normalizedHost(body["host"]),
+    ...(port === undefined ? {} : { port }),
+    mode: queryMode(body["mode"]),
+    timeoutMs:
+      optionalInteger(body["timeoutMs"], "timeoutMs", 1, MAX_HOSTED_TIMEOUT_MS) ??
+      MAX_HOSTED_TIMEOUT_MS,
+    maxProbes,
+  };
+}
+
+/**
+ * Groups detections of one host. Detection probes several ports, so it is keyed apart from the
+ * single-port destinations queries use.
+ */
+export function detectDestinationKey(input: HostedDetectInput): string {
+  return `${input.host}:*`;
 }
 
 /**

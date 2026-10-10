@@ -87,4 +87,26 @@ describe("start rate gate", () => {
     gate.clear();
     expect(gate.snapshot()).toMatchObject({ startsInWindow: 0, trackedDestinations: 0 });
   });
+
+  it("charges and refunds a multi-start admission as one unit", () => {
+    let now = 1_000;
+    const gate = new StartRateGate(
+      testStartRate({ windowMs: 10_000, maxStarts: 8, maxStartsPerDestination: 5 }),
+      () => now,
+    );
+
+    const detection = gate.admit("host:*", 5);
+    expect(detection).toEqual({ admitted: true, startedAt: 1_000 });
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 5 });
+    now += 2_000;
+    expect(gate.admit("host:*")).toEqual({ admitted: false, retryAfterSeconds: 8 });
+    expect(gate.admit("other:*", 4)).toEqual({ admitted: false, retryAfterSeconds: 8 });
+    expect(gate.admit("other:*", 3)).toMatchObject({ admitted: true });
+
+    if (detection.admitted) {
+      gate.refund("host:*", detection.startedAt, 5);
+    }
+    expect(gate.snapshot()).toMatchObject({ startsInWindow: 3, trackedDestinations: 1 });
+    expect(gate.admit("host:*", 5)).toMatchObject({ admitted: true });
+  });
 });

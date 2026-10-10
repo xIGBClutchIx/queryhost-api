@@ -158,4 +158,27 @@ describe("capacity gate", () => {
       CapacityRejectedError,
     );
   });
+
+  it("charges custom work its cost and refunds it by the caller's rule", async () => {
+    const gate = new CapacityGate({
+      maxActive: 2,
+      maxQueued: 0,
+      maxPerDestination: 1,
+      destinationCooldownMs: 0,
+      startRate: testStartRate({ maxStarts: 6 }),
+    });
+    const charge = { cost: 4, refundable: (value: string) => value === "blocked" };
+
+    await expect(gate.runCharged("one", () => Promise.resolve("blocked"), charge)).resolves.toBe(
+      "blocked",
+    );
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 0 });
+    await expect(gate.runCharged("one", () => Promise.resolve("ok"), charge)).resolves.toBe("ok");
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 4 });
+    const task = vi.fn(() => Promise.resolve("ok"));
+    await expect(gate.runCharged("two", task, charge)).rejects.toBeInstanceOf(
+      CapacityRejectedError,
+    );
+    expect(task).not.toHaveBeenCalled();
+  });
 });

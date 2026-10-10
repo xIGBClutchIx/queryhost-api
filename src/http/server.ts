@@ -8,7 +8,9 @@ import type {
   ApiErrorCode,
   ApiErrorResponse,
   GamesResponse,
+  DetectExecutor,
   HealthResponse,
+  HostedDetectResponse,
   HostedQueryResponse,
   QueryExecutor,
 } from "../contracts.js";
@@ -16,14 +18,20 @@ import type { Logger } from "../logging.js";
 import { CapacityRejectedError } from "../runtime/capacity-gate.js";
 import { QueryService } from "../runtime/query-service.js";
 import { UsageStats, type UsageSnapshot } from "../runtime/usage-stats.js";
-import { QueryInputError, parseQueryInput } from "../validation/query-input.js";
+import { QueryInputError, parseDetectInput, parseQueryInput } from "../validation/query-input.js";
 import { BodyReadError, readBoundedBody } from "./body.js";
 import { isOriginAuthorized } from "./origin-auth.js";
 
 type Clock = () => number;
 type JsonPayload =
-  ApiErrorResponse | GamesResponse | HealthResponse | HostedQueryResponse | UsageSnapshot;
-type RouteName = "/games" | "/health" | "/query" | "/stats" | "unmatched";
+  | ApiErrorResponse
+  | GamesResponse
+  | HealthResponse
+  | HostedDetectResponse
+  | HostedQueryResponse
+  | UsageSnapshot;
+type RouteName = "/detect" | "/games" | "/health" | "/query" | "/stats" | "unmatched";
+type JsonRoute = "/detect" | "/query";
 
 interface RequestOutcome {
   readonly status: number;
@@ -67,6 +75,7 @@ function mediaType(request: IncomingMessage): string {
 function routeName(request: IncomingMessage): RouteName {
   const pathname = new URL(request.url ?? "/", "http://queryhost.invalid").pathname;
   if (
+    pathname === "/detect" ||
     pathname === "/games" ||
     pathname === "/health" ||
     pathname === "/query" ||
@@ -92,13 +101,28 @@ function methodNotAllowed(
   return { status: 405 };
 }
 
-async function queryRoute(
+function overloaded(
+  response: ServerResponse,
+  requestId: string,
+  error: CapacityRejectedError,
+): void {
+  sendJson(
+    response,
+    429,
+    errorResponse("OVERLOADED", "The query service is at capacity. Try again later."),
+    requestId,
+    { "retry-after": error.retryAfterSeconds.toString() },
+  );
+}
+
+/** Reads a bounded JSON body, or answers the request and returns its outcome instead. */
+async function readJsonBody(
   request: IncomingMessage,
   response: ServerResponse,
   requestId: string,
   config: ApiConfig,
-  queries: QueryService,
-): Promise<RequestOutcome> {
+  route: JsonRoute,
+): Promise<string | RequestOutcome> {
   const contentEncoding = request.headers["content-encoding"]?.toLowerCase();
   if (
     mediaType(request) !== "application/json" ||
@@ -109,16 +133,15 @@ async function queryRoute(
       415,
       errorResponse(
         "UNSUPPORTED_MEDIA_TYPE",
-        "POST /query requires an uncompressed application/json body.",
+        `POST ${route} requires an uncompressed application/json body.`,
       ),
       requestId,
     );
     return { status: 415 };
   }
 
-  let text: string;
   try {
-    text = await readBoundedBody(request, config.maxBodyBytes);
+    return await readBoundedBody(request, config.maxBodyBytes);
   } catch (error) {
     if (error instanceof BodyReadError) {
       const status = error.code === "BODY_TOO_LARGE" ? 413 : 400;
@@ -127,16 +150,39 @@ async function queryRoute(
     }
     throw error;
   }
+}
 
-  let input;
+/** Parses validated input, or answers 400 and returns the outcome instead. */
+function parseBody<T>(
+  response: ServerResponse,
+  requestId: string,
+  parse: () => T,
+): T | RequestOutcome {
   try {
-    input = parseQueryInput(text);
+    return parse();
   } catch (error) {
     if (error instanceof QueryInputError) {
       sendJson(response, 400, errorResponse("BAD_REQUEST", error.message), requestId);
       return { status: 400 };
     }
     throw error;
+  }
+}
+
+async function queryRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  config: ApiConfig,
+  queries: QueryService,
+): Promise<RequestOutcome> {
+  const text = await readJsonBody(request, response, requestId, config, "/query");
+  if (typeof text !== "string") {
+    return text;
+  }
+  const input = parseBody(response, requestId, () => parseQueryInput(text));
+  if ("status" in input) {
+    return input;
   }
 
   try {
@@ -148,14 +194,39 @@ async function queryRoute(
     return { status: 200, cache: result.cache.status, game: input.game };
   } catch (error) {
     if (error instanceof CapacityRejectedError) {
-      sendJson(
-        response,
-        429,
-        errorResponse("OVERLOADED", "The query service is at capacity. Try again later."),
-        requestId,
-        { "retry-after": error.retryAfterSeconds.toString() },
-      );
+      overloaded(response, requestId, error);
       return { status: 429, game: input.game };
+    }
+    throw error;
+  }
+}
+
+async function detectRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  config: ApiConfig,
+  queries: QueryService,
+): Promise<RequestOutcome> {
+  const text = await readJsonBody(request, response, requestId, config, "/detect");
+  if (typeof text !== "string") {
+    return text;
+  }
+  const input = parseBody(response, requestId, () =>
+    parseDetectInput(text, config.detectMaxProbes),
+  );
+  if ("status" in input) {
+    return input;
+  }
+
+  try {
+    const result = await queries.detect(input);
+    sendJson(response, 200, result, requestId);
+    return result.ok ? { status: 200, game: result.game } : { status: 200 };
+  } catch (error) {
+    if (error instanceof CapacityRejectedError) {
+      overloaded(response, requestId, error);
+      return { status: 429 };
     }
     throw error;
   }
@@ -229,6 +300,13 @@ async function routeRequest(
     return queryRoute(request, response, requestId, config, queries);
   }
 
+  if (url.pathname === "/detect") {
+    if (request.method !== "POST") {
+      return methodNotAllowed(response, requestId, "POST");
+    }
+    return detectRoute(request, response, requestId, config, queries);
+  }
+
   sendJson(
     response,
     404,
@@ -244,9 +322,10 @@ export function createApiServer(
   executor: QueryExecutor,
   logger: Logger,
   now: Clock = Date.now,
+  detector?: DetectExecutor,
 ): ApiServer {
   const usage = new UsageStats(now);
-  const queries = new QueryService(config, executor, now, usage);
+  const queries = new QueryService(config, executor, now, usage, detector);
   const startedAt = now();
   const server = createServer((request, response) => {
     const requestId = randomUUID();

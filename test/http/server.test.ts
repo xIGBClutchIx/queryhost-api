@@ -5,15 +5,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ApiErrorResponse,
+  DetectExecutor,
   GamesResponse,
   HealthResponse,
+  HostedDetectResponse,
   HostedQueryResponse,
   QueryExecutor,
 } from "../../src/contracts.js";
 import { createApiServer, type ApiServer } from "../../src/http/server.js";
 import { ORIGIN_TOKEN_HEADER } from "../../src/http/origin-auth.js";
 import type { Logger, LogFields } from "../../src/logging.js";
-import { deferred, successfulResult, testConfig, testStartRate } from "../helpers.js";
+import {
+  deferred,
+  detectedResult,
+  successfulResult,
+  testConfig,
+  testStartRate,
+} from "../helpers.js";
 
 class SilentLogger implements Logger {
   public info(): void {}
@@ -58,8 +66,9 @@ async function start(
   executor: QueryExecutor,
   config = testConfig(),
   logger: Logger = new SilentLogger(),
+  detector?: DetectExecutor,
 ): Promise<RunningApi> {
-  const api = createApiServer(config, executor, logger);
+  const api = createApiServer(config, executor, logger, Date.now, detector);
   await new Promise<void>((resolve) => {
     api.server.listen(0, "127.0.0.1", resolve);
   });
@@ -326,5 +335,91 @@ describe("portable HTTP API", () => {
     expect(rejected.status).toBe(429);
     expect(rejected.headers.get("retry-after")).toBe("60");
     expect(executor).toHaveBeenCalledOnce();
+  });
+
+  it("detects games with the configured probe budget and reports host-free counters", async () => {
+    const detector = vi.fn<DetectExecutor>(() => Promise.resolve(detectedResult()));
+    const logger = new CapturingLogger();
+    const { baseUrl } = await start(
+      () => Promise.resolve(successfulResult()),
+      testConfig({ detectMaxProbes: 3 }),
+      logger,
+      detector,
+    );
+    const headers = authorizedHeaders();
+
+    const response = await fetch(`${baseUrl}/detect`, {
+      method: "POST",
+      headers,
+      body: '{"host":"private-target.example.com","port":28015,"timeoutMs":4000}',
+    });
+    expect(response.status).toBe(200);
+    await expect(parsed<HostedDetectResponse>(response)).resolves.toMatchObject({
+      ok: true,
+      game: "rust",
+      evidence: "advertised",
+    });
+    expect(detector).toHaveBeenCalledWith({
+      host: "private-target.example.com",
+      port: 28_015,
+      mode: "full",
+      timeoutMs: 4_000,
+      maxProbes: 3,
+    });
+
+    const invalid = await fetch(`${baseUrl}/detect`, {
+      method: "POST",
+      headers,
+      body: '{"host":"play.example.com","maxProbes":16}',
+    });
+    expect(invalid.status).toBe(400);
+    const wrongMethod = await fetch(`${baseUrl}/detect`, { headers });
+    expect(wrongMethod.status).toBe(405);
+    const unauthorized = await fetch(`${baseUrl}/detect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"host":"play.example.com"}',
+    });
+    expect(unauthorized.status).toBe(401);
+    expect(detector).toHaveBeenCalledOnce();
+
+    const stats = await fetch(`${baseUrl}/stats`, { headers });
+    const text = await stats.text();
+    expect(text).not.toContain("private-target");
+    expect(JSON.parse(text)).toMatchObject({
+      detections: { games: { rust: 1 }, failed: 0, errors: {} },
+    });
+    expect(logger.entries.join("\n")).not.toContain("private-target");
+    expect(logger.entries.some((entry) => entry.includes('"route":"/detect"'))).toBe(true);
+  });
+
+  it("rejects detections that exceed the start window before probing", async () => {
+    const detector = vi.fn<DetectExecutor>(() => Promise.resolve(detectedResult()));
+    const { baseUrl } = await start(
+      () => Promise.resolve(successfulResult()),
+      testConfig({
+        capacity: {
+          ...testConfig().capacity,
+          startRate: testStartRate({ maxStarts: 7, maxStartsPerDestination: 5 }),
+        },
+      }),
+      new SilentLogger(),
+      detector,
+    );
+    const request = (): Promise<Response> =>
+      fetch(`${baseUrl}/detect`, {
+        method: "POST",
+        headers: authorizedHeaders(),
+        body: '{"host":"play.example.com"}',
+      });
+
+    expect((await request()).status).toBe(200);
+    const limited = await request();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    await expect(parsed<ApiErrorResponse>(limited)).resolves.toMatchObject({
+      error: { code: "OVERLOADED" },
+    });
+    expect(detector).toHaveBeenCalledOnce();
   });
 });

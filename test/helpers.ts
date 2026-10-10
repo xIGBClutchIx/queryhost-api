@@ -1,7 +1,7 @@
 import type { ApiConfig } from "../src/config.js";
-import type { HostedQueryInput } from "../src/contracts.js";
+import type { HostedDetectInput, HostedQueryInput } from "../src/contracts.js";
 import type { StartRatePolicy } from "../src/runtime/start-rate-gate.js";
-import type { QueryResult } from "queryhost";
+import type { DetectErrorCode, DetectResult, QueryResult } from "queryhost";
 
 export interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -42,6 +42,7 @@ export function testConfig(overrides: Partial<ApiConfig> = {}): ApiConfig {
       partialTtlMs: 5_000,
       offlineTtlMs: 2_000,
     },
+    detectMaxProbes: 4,
     ...overrides,
   };
 }
@@ -93,5 +94,33 @@ export function failedResult(
     sources: [],
     warnings: [],
     durationMs: 5,
+  };
+}
+
+export function detectInput(host = "play.example.com", maxProbes = 4): HostedDetectInput {
+  return { host, mode: "full", timeoutMs: 5_000, maxProbes };
+}
+
+export function detectedResult(): DetectResult {
+  const result = successfulResult();
+  if (!result.ok || result.game !== "rust") {
+    throw new Error("The successful fixture must be a Rust result.");
+  }
+  return {
+    ok: true,
+    game: "rust",
+    evidence: "advertised",
+    result,
+    probes: [{ protocol: "a2s", port: 28_017, status: "matched" }],
+    durationMs: 20,
+  };
+}
+
+export function undetectedResult(code: DetectErrorCode = "NOT_DETECTED"): DetectResult {
+  return {
+    ok: false,
+    error: { code, message: "No supported game answered." },
+    probes: [],
+    durationMs: 20,
   };
 }

@@ -1,4 +1,12 @@
-import type { GameDefinition, GameId, QueryInput, QueryMode, QueryResult } from "queryhost";
+import type {
+  DetectInput,
+  DetectResult,
+  GameDefinition,
+  GameId,
+  QueryInput,
+  QueryMode,
+  QueryResult,
+} from "queryhost";
 
 /** Fully normalized query accepted by the hosted runtime. */
 export interface HostedQueryInput extends QueryInput<GameId> {
@@ -11,6 +19,19 @@ export interface HostedQueryInput extends QueryInput<GameId> {
 }
 
 export type QueryExecutor = (input: HostedQueryInput) => Promise<QueryResult>;
+
+/** Normalized detection accepted by the hosted runtime; the probe budget comes from config. */
+export interface HostedDetectInput extends DetectInput {
+  readonly host: string;
+  readonly mode: QueryMode;
+  readonly timeoutMs: number;
+  readonly maxProbes: number;
+}
+
+export type DetectExecutor = (input: HostedDetectInput) => Promise<DetectResult>;
+
+/** Detection results are returned uncached, exactly as the library reports them. */
+export type HostedDetectResponse = DetectResult;
 
 export type CacheStatus = "hit" | "miss" | "coalesced";
 
