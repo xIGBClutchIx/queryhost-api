@@ -118,10 +118,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TO: ${{ needs.prepare.outputs.to }}
-          BASE: ${{ needs.prepare.outputs.base }}
+          PREPARED_BASE: ${{ needs.prepare.outputs.base }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         working-directory: ${{ runner.temp }}/bump
         run: |
+          # Outputs from the prepare job are as untrusted as its files, so resolve the base here
+          # and leave a moved default branch to the next run.
+          BASE="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+          if [ "$BASE" != "$PREPARED_BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved since the bump was prepared; the next run retries."
+            exit 0
+          fi
+
           # The bundle comes from a job that ran the new release's code, so accept only the
           # files a pin bump is allowed to touch.
           allowed='^(package\.json|package-lock\.json|[A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
