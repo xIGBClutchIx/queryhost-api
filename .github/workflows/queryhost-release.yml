@@ -122,6 +122,23 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         working-directory: ${{ runner.temp }}/bump
         run: |
+          # The bundle comes from a job that ran the new release's code, so accept only the
+          # files a pin bump is allowed to touch.
+          allowed='^(package\.json|package-lock\.json|[A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
+          while IFS= read -r file; do
+            if ! [[ "$file" =~ $allowed ]]; then
+              echo "::error::Unexpected file in the bump: $file"
+              exit 1
+            fi
+          done < changed.txt
+          gh api "repos/$GH_REPO/contents/package.json?ref=$BASE" --jq .content | base64 -d > base-package.json
+          if ! jq -e --slurpfile base base-package.json \
+            'del(.dependencies.queryhost) == ($base[0] | del(.dependencies.queryhost))' \
+            files/package.json > /dev/null; then
+            echo "::error::package.json changed beyond the queryhost pin."
+            exit 1
+          fi
+
           branch="queryhost/v$TO"
           if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
             # A pull request in any state means a person has it; a branch without one was
