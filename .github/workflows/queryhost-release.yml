@@ -112,7 +112,7 @@ jobs:
         run: npm install --global npm@12.0.2
 
       - name: Download the bump
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: queryhost-bump
           path: ${{ runner.temp }}/bump
