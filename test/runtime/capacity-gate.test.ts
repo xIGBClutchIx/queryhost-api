@@ -181,4 +181,50 @@ describe("capacity gate", () => {
     );
     expect(task).not.toHaveBeenCalled();
   });
+
+  it("renews a queued charge when it starts and refuses one that expired while queued", async () => {
+    vi.useFakeTimers();
+    const gate = new CapacityGate({
+      maxActive: 4,
+      maxQueued: 4,
+      maxPerDestination: 1,
+      destinationCooldownMs: 1_500,
+      startRate: testStartRate({ windowMs: 1_000, maxStarts: 2 }),
+    });
+    const ok = (): Promise<QueryResult> => Promise.resolve(successfulResult());
+    await expect(gate.run("one", ok)).resolves.toMatchObject({ ok: true });
+    const queuedTask = vi.fn(ok);
+    const queued = expect(gate.run("one", queuedTask)).rejects.toBeInstanceOf(
+      CapacityRejectedError,
+    );
+    expect(gate.snapshot()).toMatchObject({ queued: 1, rate: { startsInWindow: 2 } });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(gate.run("two", ok)).resolves.toMatchObject({ ok: true });
+    await expect(gate.run("three", ok)).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(500);
+
+    await queued;
+    expect(queuedTask).not.toHaveBeenCalled();
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 2 });
+  });
+
+  it("keeps a queued charge in the window from the moment its work starts", async () => {
+    vi.useFakeTimers();
+    const gate = new CapacityGate({
+      maxActive: 4,
+      maxQueued: 4,
+      maxPerDestination: 1,
+      destinationCooldownMs: 500,
+      startRate: testStartRate({ windowMs: 1_000, maxStarts: 4 }),
+    });
+    const ok = (): Promise<QueryResult> => Promise.resolve(successfulResult());
+    await gate.run("one", ok);
+    const queued = gate.runCharged("one", ok, { cost: 2, refundable: () => false });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(queued).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(600);
+    // The first start has expired; the renewed charge from t=500 is still counted.
+    expect(gate.snapshot().rate).toMatchObject({ startsInWindow: 2 });
+  });
 });

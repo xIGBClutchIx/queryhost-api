@@ -92,7 +92,7 @@ export class CapacityGate {
       );
     }
 
-    const startedAt = admission.startedAt;
+    let startedAt = admission.startedAt;
     const admittedTask = async (): Promise<T> => {
       const result = await task();
       if (charge.refundable(result)) {
@@ -106,7 +106,21 @@ export class CapacityGate {
     }
 
     return new Promise<T>((resolve, reject) => {
-      const start = (): Promise<void> => admittedTask().then(resolve, reject);
+      const start = (): Promise<void> => {
+        // Queued work may wait past its window, so its charge is renewed as it starts.
+        const renewed = this.#startRate.renew(destination, startedAt, charge.cost);
+        if (!renewed.admitted) {
+          reject(
+            new CapacityRejectedError(
+              "The query service admission rate is limited.",
+              renewed.retryAfterSeconds,
+            ),
+          );
+          return Promise.resolve();
+        }
+        startedAt = renewed.startedAt;
+        return admittedTask().then(resolve, reject);
+      };
       this.#queue.push({ destination, start, reject });
       this.#drain();
     });
