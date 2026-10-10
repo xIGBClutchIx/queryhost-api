@@ -65,9 +65,11 @@ async function waitForPublish(version) {
   }
 }
 
+// Reads game IDs through the package-root contract, in a fresh process so the newly
+// installed version is the one imported.
 function gameIds() {
   const script =
-    'import("queryhost/registry").then((m) => console.log(JSON.stringify(Object.keys(m.GAME_REGISTRY))))';
+    'import("queryhost").then((m) => console.log(JSON.stringify(m.listGames().map((game) => game.id))))';
   return JSON.parse(
     execFileSync(process.execPath, ["--input-type=module", "-e", script], {
       cwd: root,
