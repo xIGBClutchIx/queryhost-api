@@ -127,6 +127,11 @@ jobs:
             # A pull request in any state means a person has it; a branch without one was
             # left by a failed run, so start it over.
             if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+              # Retry a CI dispatch that failed after the pull request was opened.
+              if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ] \
+                && [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
+                gh workflow run ci.yml --ref "$branch"
+              fi
               echo "$branch already has a pull request; leaving it alone."
               exit 0
             fi
