@@ -121,6 +121,20 @@ describe("portable HTTP API", () => {
       protocol: "a2s",
       defaultPort: 9876,
     });
+    expect(games.games.find((game) => game.id === "eco")).toMatchObject({
+      protocol: "eco",
+      defaultPort: 3000,
+      defaultQueryPort: 3001,
+    });
+    expect(games.games.find((game) => game.id === "vein")).toMatchObject({
+      protocol: "a2s",
+      defaultPort: 7777,
+    });
+    expect(games.games.find((game) => game.id === "avorion")).toMatchObject({
+      protocol: "a2s",
+      defaultPort: 27_000,
+      defaultQueryPort: 27_020,
+    });
 
     const wrongMethod = await fetch(`${baseUrl}/query`, { headers });
     expect(wrongMethod.status).toBe(405);

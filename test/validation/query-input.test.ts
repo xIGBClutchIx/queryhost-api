@@ -82,6 +82,18 @@ describe("hosted query input", () => {
     ).toMatchObject({ game, port, queryPort });
   });
 
+  it.each([
+    ["eco", 3000, 3001],
+    ["vein", 7777, 7778],
+    ["avorion", 27_000, 27_020],
+  ])("resolves %s to the 1.6.0 defaults", (game, port, queryPort) => {
+    expect(parseQueryInput(JSON.stringify({ game, host: "play.example.com" }))).toMatchObject({
+      game,
+      port,
+      queryPort,
+    });
+  });
+
   it("keys the cache by result-shaping fields but not the deadline", () => {
     const base = parseQueryInput('{"game":"rust","host":"play.example.com"}');
     const equivalent = parseQueryInput(
