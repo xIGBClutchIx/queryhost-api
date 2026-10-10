@@ -107,6 +107,14 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Use repository npm version
+        run: npm install --global npm@12.0.2
+
       - name: Download the bump
         uses: actions/download-artifact@v5
         with:
@@ -130,23 +138,32 @@ jobs:
             exit 0
           fi
 
-          # The bundle comes from a job that ran the new release's code, so accept only the
-          # files a pin bump is allowed to touch.
-          allowed='^(package\.json|package-lock\.json|[A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
+          if ! [[ "$TO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not an exact release version: $TO"
+            exit 1
+          fi
+
+          # The bundle comes from a job that ran the new release's code, so only its Markdown
+          # crosses over. The manifest and lockfile are rebuilt here from the base commit,
+          # resolving metadata only, so no package code runs with this job's token.
+          allowed='^([A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
+          grep -vxE 'package\.json|package-lock\.json' changed.txt > commit-files.txt || true
           while IFS= read -r file; do
             if ! [[ "$file" =~ $allowed ]]; then
               echo "::error::Unexpected file in the bump: $file"
               exit 1
             fi
-          done < changed.txt
-          gh api "repos/$GH_REPO/contents/package.json?ref=$BASE" --jq .content | base64 -d > base-package.json
-          if ! [[ "$TO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-            || ! jq -e --slurpfile base base-package.json --arg to "$TO" \
-              '.dependencies.queryhost == $to and del(.dependencies.queryhost) == ($base[0] | del(.dependencies.queryhost))' \
-              files/package.json > /dev/null; then
-            echo "::error::package.json must change only the queryhost pin, to $TO."
-            exit 1
-          fi
+          done < commit-files.txt
+          mkdir trusted
+          for file in package.json package-lock.json; do
+            gh api -H "Accept: application/vnd.github.raw+json" \
+              "repos/$GH_REPO/contents/$file?ref=$BASE" > "trusted/$file"
+          done
+          jq --arg to "$TO" '.dependencies.queryhost = $to' trusted/package.json > trusted/next.json
+          mv trusted/next.json trusted/package.json
+          (cd trusted && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          cp trusted/package.json trusted/package-lock.json files/
+          printf '%s\n' package.json package-lock.json >> commit-files.txt
 
           branch="queryhost/v$TO"
           # A pull request in any state means a person has it, even if its branch is gone.
@@ -189,7 +206,7 @@ jobs:
               '.variables.input.fileChanges.additions += [{path: $path, contents: $contents}]' \
               commit.json > next.json
             mv next.json commit.json
-          done < changed.txt
+          done < commit-files.txt
           gh api graphql --input commit.json > /dev/null
 
           gh pr create \
