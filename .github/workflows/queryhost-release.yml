@@ -8,9 +8,10 @@ name: QueryHost release
 # The library's publish workflow dispatches this with the released version as soon as npm
 # has it; the schedule is the fallback and runs the later merge checks.
 #
-# The logic lives in the library repository so both consumers get fixes at once. Tracking
-# `@main` means a change merged there takes effect here on the next run without a review in
-# this repository; both repositories have the same owner, which accepts that trade-off.
+# The steps live in `consumer-bump.yml` beside this file, which queryhost-web also calls,
+# so both consumers get fixes at once. Web tracks it at `@main`, so a change merged here
+# takes effect there on its next run without a review in that repository; both
+# repositories have the same owner, which accepts that trade-off.
 on:
   schedule:
     - cron: "7,22,37,52 * * * *"
@@ -36,7 +37,7 @@ jobs:
       checks: read
       contents: write
       pull-requests: write
-    uses: xIGBClutchIx/queryhost/.github/workflows/consumer-bump.yml@main
+    uses: ./.github/workflows/consumer-bump.yml
     with:
       commit_title: "chore: update queryhost to"
       version: ${{ inputs.version || '' }}

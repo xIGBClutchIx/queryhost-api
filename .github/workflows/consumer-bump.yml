@@ -1,0 +1,414 @@
+name: Consumer queryhost bump
+
+# Shared by the hosted consumers. It lives in this API repository, outside the library,
+# because it carries their deployment policy. This repository calls it locally, and
+# queryhost-web calls it at `xIGBClutchIx/queryhost-api/...@main`, so a change merged here
+# also changes the web merge policy on its next run; review it as web CI too. Each caller's
+# `queryhost-release.yml` owns the schedule, the manual trigger, and the concurrency group. A run opens a pull request on `queryhost/v<version>` that moves
+# the consumer's exact `queryhost` pin to a newer npm release; later runs merge that pull
+# request, which deploys, once every check in the open job below holds. Closing it,
+# marking it draft, or pushing a commit to its branch leaves it for a person.
+#
+# Everything here runs in the caller's repository: `actions/checkout` checks out the
+# caller, `github.token` is the caller's token with the permissions its calling job
+# grants, and each job below can only narrow those permissions further.
+on:
+  workflow_call:
+    inputs:
+      commit_title:
+        description: 'Commit and pull-request title before the version, such as "chore: update queryhost to"'
+        required: true
+        type: string
+      version:
+        description: queryhost version to pin; empty uses the npm latest tag
+        required: false
+        type: string
+        default: ""
+      api_repo:
+        description: Repository whose live production deployment must already serve the version; empty disables the gate
+        required: false
+        type: string
+        default: ""
+      api_environment:
+        description: GitHub deployment environment of that repository, such as "queryhost / production"
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  # Installing and importing the new release runs its code, so this job holds only a
+  # read token and does not persist it. The open job below never runs package code.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.bump.outputs.changed }}
+      to: ${{ steps.bump.outputs.to }}
+      base: ${{ steps.bump.outputs.base }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # Most scheduled runs find nothing new, so compare versions before installing anything.
+      - name: Check for a newer release
+        id: check
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$VERSION" ] && ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not an exact release version: $VERSION"
+            exit 1
+          fi
+          pinned="$(node -p 'require("./package.json").dependencies.queryhost')"
+          target="${VERSION:-$(npm view queryhost version)}"
+          echo "pinned $pinned, target $target"
+          if [ "$target" = "$pinned" ]; then echo "newer=false" >> "$GITHUB_OUTPUT"; else echo "newer=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up Node.js
+        if: steps.check.outputs.newer == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Use repository npm version
+        if: steps.check.outputs.newer == 'true'
+        run: npm install --global npm@12.0.2
+
+      - name: Install dependencies
+        if: steps.check.outputs.newer == 'true'
+        run: npm ci --ignore-scripts
+
+      # The consumer's own script, from its checkout, moves the pin and drafts the body.
+      - name: Move the queryhost pin
+        id: bump
+        if: steps.check.outputs.newer == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          node scripts/bump-queryhost.mjs ${VERSION:+"$VERSION"} --body "$RUNNER_TEMP/body.md"
+
+      - name: Bundle the changed file names and PR body
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/bump"
+          cp "$RUNNER_TEMP/body.md" "$RUNNER_TEMP/bump/body.md"
+          git diff --name-only > "$RUNNER_TEMP/bump/changed.txt"
+
+      - name: Upload the bump
+        if: steps.bump.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
+          retention-days: 1
+
+  open:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      checks: read
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Use repository npm version
+        run: npm install --global npm@12.0.2
+
+      - name: Download the bump
+        uses: actions/download-artifact@v8
+        with:
+          name: queryhost-bump
+          path: ${{ runner.temp }}/bump
+
+      - name: Open or merge the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TO: ${{ needs.prepare.outputs.to }}
+          PREPARED_BASE: ${{ needs.prepare.outputs.base }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          COMMIT_TITLE: ${{ inputs.commit_title }}
+          API_REPO: ${{ inputs.api_repo }}
+          API_ENVIRONMENT: ${{ inputs.api_environment }}
+        working-directory: ${{ runner.temp }}/bump
+        run: |
+          if [ -z "$COMMIT_TITLE" ] || [[ "$COMMIT_TITLE" == *$'\n'* ]]; then
+            echo "::error::commit_title must be a single non-empty line."
+            exit 1
+          fi
+          if [ -n "$API_REPO" ] && ! [[ "$API_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::api_repo must be owner/name, not $API_REPO."
+            exit 1
+          fi
+          if [ "${API_REPO:+set}" != "${API_ENVIRONMENT:+set}" ]; then
+            echo "::error::Set both api_repo and api_environment, or neither."
+            exit 1
+          fi
+
+          # Outputs from the prepare job are as untrusted as its files, so resolve the base here
+          # and leave a moved default branch to the next run.
+          BASE="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+          if [ "$BASE" != "$PREPARED_BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved since the bump was prepared; the next run retries."
+            exit 0
+          fi
+
+          if ! [[ "$TO" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Not an exact release version: $TO"
+            exit 1
+          fi
+
+          # The bundle comes from a job that ran the new release's code, so only its file names
+          # and PR body cross over. Every committed file is rebuilt here from the base commit,
+          # and dependencies are resolved from metadata only, so no package code runs here.
+          allowed='^([A-Za-z0-9_-]+\.md|docs/[A-Za-z0-9_-]+\.md)$'
+          grep -vxE 'package\.json|package-lock\.json' changed.txt > prose-files.txt || true
+          mkdir trusted trusted/docs
+          raw() {
+            gh api -H "Accept: application/vnd.github.raw+json" "repos/$GH_REPO/contents/$1?ref=$BASE"
+          }
+          raw package.json > trusted/package.json
+          raw package-lock.json > trusted/package-lock.json
+          FROM="$(jq -r .dependencies.queryhost trusted/package.json)"
+          : > commit-files.txt
+          while IFS= read -r file; do
+            if ! [[ "$file" =~ $allowed ]]; then
+              echo "::error::Unexpected file in the bump: $file"
+              exit 1
+            fi
+            # Only phrases that name the old pin change, as in scripts/bump-queryhost.mjs.
+            raw "$file" \
+              | jq -Rjs --arg from "$FROM" --arg to "$TO" \
+                'split("queryhost@" + $from) | join("queryhost@" + $to)
+                | split("`queryhost` " + $from) | join("`queryhost` " + $to)' \
+              > "trusted/$file.next"
+            raw "$file" > "trusted/$file"
+            if ! cmp -s "trusted/$file" "trusted/$file.next"; then
+              mv "trusted/$file.next" "trusted/$file"
+              echo "$file" >> commit-files.txt
+            fi
+          done < prose-files.txt
+          jq --arg to "$TO" '.dependencies.queryhost = $to' trusted/package.json > trusted/next.json
+          mv trusted/next.json trusted/package.json
+          (cd trusted && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          printf '%s\n' package.json package-lock.json >> commit-files.txt
+
+          branch="queryhost/v$TO"
+          title="$COMMIT_TITLE $TO"
+
+          # Merge the pull request this workflow opened once every check holds. Anything a
+          # person did to it, or anything unexpected about it, leaves it for that person, and
+          # every unmet condition leaves a notice for the next run. Each API read is its own
+          # assignment so a failed call stops the job instead of reading as empty.
+          hold() {
+            echo "::notice::Not merging $branch yet: $1"
+            exit 0
+          }
+          merge_when_ready() {
+            local number="$1" pr head files status file verify comments review
+            local deployments deployment sha state api_sha api_pin head_pin head_lock tip merged
+            # Only the single pull request endpoint reports whether it is mergeable.
+            pr="$(gh api "repos/$GH_REPO/pulls/$number")"
+            head="$(jq -r .head.sha <<< "$pr")"
+            if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]] \
+              || ! jq -e --arg repo "$GH_REPO" --arg branch "$branch" --arg base "$DEFAULT_BRANCH" \
+                --arg title "$title" '
+                  .state == "open" and .draft == false and .merged == false
+                  and .user.login == "github-actions[bot]" and .user.type == "Bot"
+                  and .head.repo.full_name == $repo and .head.ref == $branch
+                  and .base.repo.full_name == $repo and .base.ref == $base
+                  and .title == $title and .commits == 1' <<< "$pr" > /dev/null \
+              || ! gh api "repos/$GH_REPO/pulls/$number/commits" \
+                | jq -e --arg head "$head" --arg title "$title" \
+                  'length == 1 and .[0].sha == $head and .[0].commit.message == $title' > /dev/null; then
+              hold "#$number is not the bot's untouched bump, so it needs a person."
+            fi
+
+            # Check what GitHub says changed rather than what this run rebuilt. Only in-place
+            # edits pass: a rename or copy has another status, so neither path can move.
+            files="$(gh api --paginate "repos/$GH_REPO/pulls/$number/files?per_page=100" \
+              --jq '.[] | "\(.status) \(.filename)"')"
+            [ -n "$files" ] || hold "#$number changes no files, so it needs a person."
+            while read -r status file; do
+              if [ "$status" != "modified" ] \
+                || ! [[ "$file" =~ ^package(-lock)?\.json$ || "$file" =~ $allowed ]]; then
+                hold "#$number changes $file ($status), so it needs a person."
+              fi
+            done <<< "$files"
+
+            # The API gate compares against $TO, so the head must install exactly that.
+            head_pin="$(gh api -H "Accept: application/vnd.github.raw+json" \
+              "repos/$GH_REPO/contents/package.json?ref=$head")"
+            head_pin="$(jq -r '.dependencies.queryhost // ""' <<< "$head_pin")"
+            head_lock="$(gh api -H "Accept: application/vnd.github.raw+json" \
+              "repos/$GH_REPO/contents/package-lock.json?ref=$head")"
+            head_lock="$(jq -r '"\(.packages[""].dependencies.queryhost // "") \(.packages["node_modules/queryhost"].version // "")"' \
+              <<< "$head_lock")"
+            if [ "$head_pin" != "$TO" ] || [ "$head_lock" != "$TO $TO" ]; then
+              hold "#$number pins queryhost \"$head_pin\" with lockfile \"$head_lock\", not $TO."
+            fi
+
+            # Merging a branch that holds the whole default branch lands exactly the tree CI tested.
+            [ "$(gh api "repos/$GH_REPO/compare/$BASE...$head" --jq .behind_by)" = "0" ] \
+              || hold "#$number is behind $DEFAULT_BRANCH, so it needs a person."
+            [ "$(jq -r .mergeable <<< "$pr")" = "true" ] || hold "GitHub does not report #$number as mergeable yet."
+
+            # Every verify run on the head must have passed. GitHub lists only the latest attempt
+            # of each run, so re-running a failed one by hand replaces it here.
+            verify="$(gh api --paginate "repos/$GH_REPO/commits/$head/check-runs?check_name=verify&per_page=100" \
+              --jq '.check_runs[] | select(.app.slug == "github-actions") | "\(.status) \(.conclusion)"')"
+            if [ -z "$verify" ] || grep -qvx 'completed success' <<< "$verify"; then
+              hold "verify has not passed on $head ($(tr '\n' ',' <<< "$verify"))."
+            fi
+
+            # Codex is optional: merge without it, but not past any of its reviews of this head
+            # that reports unresolved findings.
+            comments="$(gh api --paginate "repos/$GH_REPO/issues/$number/comments?per_page=100")"
+            review="$(jq -rs --arg head "$head" '
+                  [.[][] | select(.user.login == "chatgpt-codex-connector[bot]") | .body // ""
+                    | split("codex-review-state:v1")[1:][] | split("-->")[0] | try fromjson | objects
+                    | .[] | objects | select(.commit_sha == $head)]
+                  | if any(.has_unresolved_findings == true) then "unresolved" else "clear" end' \
+                <<< "$comments")"
+            [ "$review" = "clear" ] || hold "Codex has unresolved findings on $head, so it needs a person."
+
+            # A consumer that sends game IDs to the API must not list a game the API rejects.
+            # Within a major version a newer release only adds games, so an API already past
+            # $TO is safe, and requiring an exact match would strand this pull request whenever
+            # the API moves first. Deployments list newest first, and a newer one that is still
+            # building or failed leaves the previous successful one serving.
+            if [ -n "$API_REPO" ]; then
+              deployments="$(gh api -X GET "repos/$API_REPO/deployments" \
+                -f environment="$API_ENVIRONMENT" -F per_page=30 \
+                --jq '.[] | select(.creator.login == "railway-app[bot]") | "\(.id) \(.sha)"')"
+              api_sha=""
+              while read -r deployment sha; do
+                [ -n "$deployment" ] || continue
+                state="$(gh api "repos/$API_REPO/deployments/$deployment/statuses?per_page=1" \
+                  --jq '.[0].state // ""')"
+                if [ "$state" = success ]; then
+                  api_sha="$sha"
+                  break
+                fi
+              done <<< "$deployments"
+              [ -n "$api_sha" ] || hold "no live $API_REPO deployment in $API_ENVIRONMENT."
+              api_pin="$(gh api -H "Accept: application/vnd.github.raw+json" \
+                "repos/$API_REPO/contents/package.json?ref=$api_sha")"
+              api_pin="$(jq -r '.dependencies.queryhost // ""' <<< "$api_pin")"
+              if ! [[ "$api_pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                || [ "${api_pin%%.*}" != "${TO%%.*}" ] \
+                || [ "$(printf '%s\n' "$TO" "$api_pin" | sort -V | head -n1)" != "$TO" ]; then
+                hold "the live API at $api_sha pins queryhost \"$api_pin\", not $TO or newer in its major."
+              fi
+            fi
+
+            # --match-head-commit pins only the head, so leave a default branch that moved since
+            # BASE was read to the next run rather than merging past a tip CI never saw.
+            tip="$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)"
+            [ "$tip" = "$BASE" ] || hold "$DEFAULT_BRANCH moved before #$number merged."
+            merged=0
+            gh pr merge "$number" --merge --delete-branch --match-head-commit "$head" || merged=$?
+
+            # A merge made with GITHUB_TOKEN does not start push workflows, and Railway waits for
+            # CI on the default branch before it deploys. Once merged, the pin matches and no
+            # later run retries, so dispatch here whenever GitHub reports the merge.
+            if [ "$(gh api "repos/$GH_REPO/pulls/$number" --jq .merged)" != "true" ]; then
+              echo "::error::Merging pull request #$number failed; the next run checks it again."
+              exit 1
+            fi
+            [ "$merged" = 0 ] || echo "::warning::gh reported an error, but pull request #$number merged."
+            for _ in 1 2 3; do
+              if gh workflow run ci.yml --ref "$DEFAULT_BRANCH"; then
+                echo "Merged pull request #$number and started CI on $DEFAULT_BRANCH."
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "::error::Merged pull request #$number but could not start CI on $DEFAULT_BRANCH; run it by hand."
+            exit 1
+          }
+
+          # A pull request in any state means this release is under way, even if its branch is gone.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            open_prs="$(gh pr list --head "$branch" --state open --json number --jq '.[].number')"
+            if [ -z "$open_prs" ]; then
+              echo "$branch already has a closed pull request; leaving it alone."
+              exit 0
+            fi
+            # Retry a CI dispatch that failed after the pull request was opened.
+            if [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
+              gh workflow run ci.yml --ref "$branch"
+              echo "Started CI on $branch; the next run checks the pull request."
+              exit 0
+            fi
+            [ "$(wc -l <<< "$open_prs")" = "1" ] || hold "$branch has more than one open pull request."
+            merge_when_ready "$open_prs"
+            exit 0
+          fi
+          # A branch without a pull request was left by a failed run, so start it over.
+          if gh api "repos/$GH_REPO/git/ref/heads/$branch" > /dev/null 2>&1; then
+            gh api -X DELETE "repos/$GH_REPO/git/refs/heads/$branch"
+          fi
+          if [ -n "$(gh pr list --state open --search "\"queryhost to $TO\" in:title" --json number --jq '.[].number')" ]; then
+            echo "A pull request for queryhost $TO is already open."
+            exit 0
+          fi
+
+          # Rebuilding the files takes a while, so leave a default branch that moved meanwhile
+          # to the next run rather than opening a pull request on a stale base.
+          if [ "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" != "$BASE" ]; then
+            echo "::notice::$DEFAULT_BRANCH moved while the bump was rebuilt; the next run retries."
+            exit 0
+          fi
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$branch" -f sha="$BASE" > /dev/null
+
+          # Commit through the API so GitHub signs it; the runner holds no signing key.
+          jq -n \
+            --arg query 'mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }' \
+            --arg repo "$GH_REPO" \
+            --arg branch "$branch" \
+            --arg head "$BASE" \
+            --arg headline "$title" \
+            '{query: $query, variables: {input: {
+              branch: {repositoryNameWithOwner: $repo, branchName: $branch},
+              expectedHeadOid: $head,
+              message: {headline: $headline},
+              fileChanges: {additions: []}
+            }}}' > commit.json
+          while IFS= read -r file; do
+            base64 -w0 "trusted/$file" > contents.b64
+            jq --arg path "$file" --rawfile contents contents.b64 \
+              '.variables.input.fileChanges.additions += [{path: $path, contents: $contents}]' \
+              commit.json > next.json
+            mv next.json commit.json
+          done < commit-files.txt
+          gh api graphql --input commit.json > /dev/null
+
+          gh pr create \
+            --base "$DEFAULT_BRANCH" \
+            --head "$branch" \
+            --title "$title" \
+            --body-file body.md \
+            --assignee "$GITHUB_REPOSITORY_OWNER"
+
+          # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows,
+          # so run CI on the branch explicitly; its check attaches to the PR's head commit.
+          gh workflow run ci.yml --ref "$branch"
