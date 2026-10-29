@@ -247,6 +247,12 @@ jobs:
               return
             fi
 
+            # --match-head-commit pins only the head, so leave a default branch that moved since
+            # BASE was read to the next run rather than merging past a tip CI never saw.
+            if [ "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" != "$BASE" ]; then
+              echo "::notice::$DEFAULT_BRANCH moved before pull request #$number merged; the next run checks again."
+              return
+            fi
             gh pr merge "$number" --repo "$GH_REPO" --merge --delete-branch --match-head-commit "$head"
 
             # A merge made with GITHUB_TOKEN does not start push workflows, and Railway waits for
