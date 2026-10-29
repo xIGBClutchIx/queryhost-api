@@ -44,7 +44,11 @@ Record the measured CPU and memory peaks before changing the initial replica lim
 
 This service pins an exact `queryhost` version. The `QueryHost release` workflow opens the pull request that moves the pin: it checks npm every 15 minutes, and running it by hand from the Actions tab, optionally with a version, starts it at once. The same change runs locally with `node scripts/bump-queryhost.mjs [version]`.
 
-The pull request carries the pin, the lockfile, prose that names the old pin, the library changelog entries, and any new game IDs. GitHub does not start pull-request workflows for pull requests opened by `GITHUB_TOKEN`, so the workflow dispatches CI on the branch itself. It needs **Allow GitHub Actions to create and approve pull requests** enabled under Settings, Actions, General. Merging still deploys, so review and merge it by hand.
+The pull request carries the pin, the lockfile, prose that names the old pin, the library changelog entries, and any new game IDs. GitHub does not start pull-request workflows for pull requests opened by `GITHUB_TOKEN`, so the workflow dispatches CI on the branch itself. It needs **Allow GitHub Actions to create and approve pull requests** enabled under Settings, Actions, General.
+
+Merging deploys, and the workflow merges the pull request itself. Each later run re-checks it and merges once all of these hold: it is open, not a draft, and opened by `github-actions[bot]` from `queryhost/v<version>` with the expected title; it still holds only the bot's single commit; it changes only `package.json`, `package-lock.json`, and the allowed prose files; it is current with `main` and mergeable; `verify` passed on its head commit; and no Codex review of that head reports unresolved findings. Codex is not required, so a pull request it never reviews still merges. A merge made with `GITHUB_TOKEN` does not start push workflows, so the workflow then dispatches CI on `main`, which Railway waits for before deploying.
+
+To stop a merge, close the pull request, mark it as a draft, or push a commit to its branch. Any of these leaves it for a person to review and merge by hand, as does `main` moving ahead of it.
 
 ## Logs and health
 
