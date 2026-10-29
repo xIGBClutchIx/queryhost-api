@@ -11,6 +11,15 @@ This repository contains the portable hosted API. It consumes `queryhost` only t
 - Never log target hosts, player data, secrets, request bodies, or arbitrary exceptions.
 - Keep TypeScript strict and do not use explicit `any` or `unknown`.
 
+## Related repositories
+
+Sibling repositories live beside this one. Use these absolute paths; relative paths break inside worktrees.
+
+- `C:\Users\camer\repos\queryhost\query` — the `queryhost` library. Read it to understand the public contract; library changes are made, released, and then picked up here with a version bump.
+- `C:\Users\camer\repos\queryhost\web` — public site at `query.host`, which calls this API server-side.
+
+Cross-project decisions and their rationale live in `C:\Users\camer\repos\queryhost\query\docs\Decisions.md`. Read it before changing project shape or scope.
+
 ## Finish gate
 
 Run `npm run verify`. Add focused tests for contract, cache, coalescing, capacity, and lifecycle changes. Push, deploy, publish, or expose domains only when the current request authorizes that action. Prepare and verify the requested work first; ask once if authorization or the destination remains unresolved.
