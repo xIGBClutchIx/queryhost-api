@@ -2,7 +2,10 @@ name: QueryHost release
 
 # Opens a pull request that moves the exact `queryhost` pin to a newer npm release.
 # The schedule picks a release up within 15 minutes; run it by hand to start sooner.
-# Merging stays manual because it deploys.
+# Later runs merge that pull request, which deploys, once `verify` passes on its head, it
+# still holds only the bot's single commit, it is current with the default branch, and no
+# Codex review of that head has unresolved findings. To stop it, close the pull request,
+# mark it as a draft, or push a commit to its branch; then it waits for a person.
 on:
   schedule:
     - cron: "7,22,37,52 * * * *"
@@ -175,14 +178,114 @@ jobs:
           printf '%s\n' package.json package-lock.json >> commit-files.txt
 
           branch="queryhost/v$TO"
-          # A pull request in any state means a person has it, even if its branch is gone.
-          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
-            # Retry a CI dispatch that failed after the pull request was opened.
-            if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ] \
-              && [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
-              gh workflow run ci.yml --ref "$branch"
+
+          # Merge the pull request this workflow opened once CI passes on its head. Anything a
+          # person did to it, or anything unexpected about it, leaves it for that person.
+          merge_when_ready() {
+            local number="$1" pr head files status file verify comments review
+            pr="$(gh api "repos/$GH_REPO/pulls/$number")"
+            head="$(jq -r .head.sha <<< "$pr")"
+            if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]] \
+              || ! jq -e --arg repo "$GH_REPO" --arg branch "$branch" --arg base "$DEFAULT_BRANCH" \
+                --arg title "$COMMIT_TITLE $TO" '
+                  .state == "open" and .draft == false and .merged == false
+                  and .user.login == "github-actions[bot]" and .user.type == "Bot"
+                  and .head.repo.full_name == $repo and .head.ref == $branch
+                  and .base.repo.full_name == $repo and .base.ref == $base
+                  and .title == $title and .commits == 1' <<< "$pr" > /dev/null \
+              || ! gh api "repos/$GH_REPO/pulls/$number/commits" \
+                | jq -e --arg head "$head" --arg title "$COMMIT_TITLE $TO" \
+                  'length == 1 and .[0].sha == $head and .[0].commit.message == $title' > /dev/null; then
+              echo "::notice::Pull request #$number is not the bot's untouched bump; leaving it for a person."
+              return
             fi
-            echo "$branch already has a pull request; leaving it alone."
+
+            # Check what GitHub says changed rather than what this run rebuilt. Each API read is
+            # its own assignment so a failed call stops the job instead of reading as empty.
+            files="$(gh api --paginate "repos/$GH_REPO/pulls/$number/files?per_page=100" \
+              --jq '.[] | "\(.status) \(.filename)"')"
+            if [ -z "$files" ]; then
+              echo "::notice::Pull request #$number changes no files; leaving it for a person."
+              return
+            fi
+            while read -r status file; do
+              if [ "$status" != "modified" ] \
+                || ! [[ "$file" =~ ^package(-lock)?\.json$ || "$file" =~ $allowed ]]; then
+                echo "::notice::Pull request #$number changes $file ($status); leaving it for a person."
+                return
+              fi
+            done <<< "$files"
+
+            # Merging a branch that holds the whole default branch lands exactly the tree CI tested.
+            if [ "$(gh api "repos/$GH_REPO/compare/$BASE...$head" --jq .behind_by)" != "0" ]; then
+              echo "::notice::Pull request #$number is behind $DEFAULT_BRANCH; leaving it for a person."
+              return
+            fi
+            if [ "$(jq -r .mergeable <<< "$pr")" != "true" ]; then
+              echo "GitHub does not report pull request #$number as mergeable yet; the next run checks again."
+              return
+            fi
+
+            verify="$(gh api --paginate "repos/$GH_REPO/commits/$head/check-runs?check_name=verify&per_page=100" \
+              --jq '.check_runs[] | select(.app.slug == "github-actions") | "\(.status) \(.conclusion)"')"
+            if [ -z "$verify" ] || grep -qvx 'completed success' <<< "$verify"; then
+              echo "verify has not passed on $head yet ($(tr '\n' ',' <<< "$verify")); the next run checks again."
+              return
+            fi
+
+            # Codex is optional: merge without it, but not past its findings on this head.
+            comments="$(gh api --paginate "repos/$GH_REPO/issues/$number/comments?per_page=100")"
+            review="$(jq -rs --arg head "$head" '
+                  [.[][] | select(.user.login == "chatgpt-codex-connector[bot]") | .body
+                    | select(contains("codex-review-state:v1"))
+                    | split("codex-review-state:v1")[1] | split("-->")[0] | try fromjson | objects
+                    | (.code_review, .security_review) | objects | select(.commit_sha == $head)]
+                  | if any(.has_unresolved_findings == true) then "unresolved" else "clear" end' \
+                <<< "$comments")"
+            if [ "$review" != "clear" ]; then
+              echo "::notice::Codex has unresolved findings on $head in pull request #$number; leaving it for a person."
+              return
+            fi
+
+            # --match-head-commit pins only the head, so leave a default branch that moved since
+            # BASE was read to the next run rather than merging past a tip CI never saw.
+            if [ "$(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq .object.sha)" != "$BASE" ]; then
+              echo "::notice::$DEFAULT_BRANCH moved before pull request #$number merged; the next run checks again."
+              return
+            fi
+            gh pr merge "$number" --repo "$GH_REPO" --merge --delete-branch --match-head-commit "$head"
+
+            # A merge made with GITHUB_TOKEN does not start push workflows, and Railway waits for
+            # CI on the default branch before it deploys. No later run retries this, so retry here.
+            for _ in 1 2 3; do
+              if gh workflow run ci.yml --ref "$DEFAULT_BRANCH"; then
+                echo "Merged pull request #$number and started CI on $DEFAULT_BRANCH."
+                return
+              fi
+              sleep 10
+            done
+            echo "::error::Merged pull request #$number but could not start CI on $DEFAULT_BRANCH; run it by hand."
+            exit 1
+          }
+
+          # A pull request in any state means this release is under way, even if its branch is gone.
+          if [ -n "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]; then
+            open_prs="$(gh pr list --head "$branch" --state open --json number --jq '.[].number')"
+            if [ -z "$open_prs" ]; then
+              echo "$branch already has a closed pull request; leaving it alone."
+              exit 0
+            fi
+            # Retry a CI dispatch that failed after the pull request was opened.
+            if [ "$(gh run list --workflow ci.yml --branch "$branch" --json databaseId --jq length)" = "0" ]; then
+              gh workflow run ci.yml --ref "$branch"
+              echo "Started CI on $branch; the next run checks the pull request."
+              exit 0
+            fi
+            if [ "$(wc -l <<< "$open_prs")" != "1" ]; then
+              echo "::notice::$branch has more than one open pull request; leaving them for a person."
+              exit 0
+            fi
+            merge_when_ready "$open_prs"
             exit 0
           fi
           # A branch without a pull request was left by a failed run, so start it over.
